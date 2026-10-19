@@ -1,0 +1,40 @@
+name: ace-toolchain-probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    steps:
+      - name: Record available Xcode and iig interfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          sw_vers | tee out/macos.txt
+          ls -d /Applications/Xcode*.app | tee out/xcodes.txt
+          xcodebuild -version | tee out/xcode-default.txt
+          for developer in /Applications/Xcode_*.app/Contents/Developer; do
+            [ -d "$developer" ] || continue
+            name=$(basename "$(dirname "$(dirname "$developer")")" .app)
+            DEVELOPER_DIR="$developer" xcodebuild -version > "out/$name-version.txt"
+            generator=$(DEVELOPER_DIR="$developer" xcrun --sdk macosx --find iig)
+            shasum -a 256 "$generator" > "out/$name-iig-sha256.txt"
+            set +e
+            DEVELOPER_DIR="$developer" "$generator" --help > "out/$name-iig-help.txt" 2>&1
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "out/$name-iig-help-status.txt"
+            cat "out/$name-iig-help.txt"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ace-toolchain-probe
+          path: out/
+          retention-days: 7
