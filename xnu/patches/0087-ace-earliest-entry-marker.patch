@@ -36,6 +36,7 @@ diff --git a/osfmk/arm64/genassym.c b/osfmk/arm64/genassym.c
  	DECLARE("BA_PHYS_BASE", offsetof(struct boot_args, physBase));
  	DECLARE("BA_MEM_SIZE", offsetof(struct boot_args, memSize));
 diff --git a/osfmk/arm64/ace_early_entry.h b/osfmk/arm64/ace_early_entry.h
+new file mode 100644
 --- /dev/null
 +++ b/osfmk/arm64/ace_early_entry.h
 @@ -0,0 +1,199 @@
