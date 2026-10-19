@@ -1,0 +1,292 @@
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -64,7 +64,7 @@
+ MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
+ # SWEET remains a compatibility selector for the shared OSS software providers.
+ # ACE selects its own board header and excludes all Qualcomm hardware paths.
+-MACHINE_FLAGS_ARM64_ACE = -DARM64_BOARD_CONFIG_ACE -DARM64_BOARD_CONFIG_SWEET -march=armv8.2-a+crypto
++MACHINE_FLAGS_ARM64_ACE = -DARM64_BOARD_CONFIG_ACE -DARM64_BOARD_CONFIG_SWEET -mcpu=cortex-a55 -march=armv8.2-a+crypto
+ 
+ 
+ #
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -27,6 +27,10 @@
+ #include <pexpert/arm64/board_config.h>
+ #include <arm64/proc_reg.h>
+ #include <arm64/sweet_early.h>
++#if defined(ARM64_BOARD_CONFIG_ACE)
++#include <pexpert/arm64/boot.h>
++#include <pexpert/arm/ace_pmsg.h>
++#endif
+ #include <pexpert/arm/protos.h>
+ #include <kern/sched_prim.h>
+ #if HIBERNATION
+@@ -698,6 +702,87 @@
+ 	gPESF = fns;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_ACE)
++/* Explicit opt-in, exact observed ECC-free resource, outside XNU-managed RAM.
++ * This backend starts at normal KPRINTF initialization, not before the MMU. */
++static struct ace_pmsg_console ace_pmsg_console;
++
++static void ace_pmsg_serial_init(void) {}
++static unsigned int ace_pmsg_tx_ready(void) { return 1; }
++static unsigned int ace_pmsg_rx_ready(void) { return 0; }
++static uint8_t ace_pmsg_rx_data(void) { return 0; }
++
++static void
++ace_pmsg_tx_data(uint8_t byte)
++{
++	if (ace_pmsg_console_putc(&ace_pmsg_console, byte) == ACE_PMSG_OK) {
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++}
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) ace_pmsg_serial_functions = {
++	.init = ace_pmsg_serial_init,
++	.transmit_ready = ace_pmsg_tx_ready,
++	.receive_ready = ace_pmsg_rx_ready,
++	.transmit_data = ace_pmsg_tx_data,
++	.receive_data = ace_pmsg_rx_data,
++	.device = SERIAL_ACE_PMSG
++};
++
++static void
++ace_pmsg_probe(void)
++{
++	DTEntry entry;
++	const void *property;
++	unsigned int size;
++	uint64_t reg[2];
++	uint32_t ecc, type_signature;
++	unsigned int enabled = 0;
++	static const char compatible[] = "ace,ramoops-pmsg-v1";
++	boot_args *args = (boot_args *)PE_state.bootArgs;
++
++	if (!PE_parse_boot_argn("ace_pmsg", &enabled, sizeof(enabled)) || enabled != 1 ||
++	    !args || args->Revision != 2 || args->Version != 2 || !args->memSize ||
++	    args->physBase > UINT64_MAX - args->memSize ||
++	    __builtin_arm_rsr64("CurrentEL") != 4 ||
++	    (__builtin_arm_rsr64("SCTLR_EL1") & (1ULL << 25))) {
++		return;
++	}
++	if (SecureDTLookupEntry(NULL, "/chosen/ace-pmsg", &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, "compatible", &property, &size) != kSuccess ||
++	    size != sizeof(compatible) || memcmp(property, compatible, size) != 0) {
++		return;
++	}
++	if (SecureDTGetProperty(entry, "reg", &property, &size) != kSuccess || size != sizeof(reg)) {
++		return;
++	}
++	memcpy(reg, property, sizeof(reg));
++	if (SecureDTGetProperty(entry, "ecc-size", &property, &size) != kSuccess || size != sizeof(ecc)) {
++		return;
++	}
++	memcpy(&ecc, property, sizeof(ecc));
++	if (SecureDTGetProperty(entry, "type-signature", &property, &size) != kSuccess ||
++	    size != sizeof(type_signature)) {
++		return;
++	}
++	memcpy(&type_signature, property, sizeof(type_signature));
++	if (ecc || type_signature || reg[0] != 0x48160000ULL || reg[1] != ACE_PMSG_BYTES ||
++	    (reg[0] < args->physBase + args->memSize && args->physBase < reg[0] + reg[1])) {
++		return;
++	}
++	/* Both ends are 16K aligned: only the four observed resource pages. */
++	volatile void *mapped = (volatile void *)ml_io_map_wcomb(reg[0], reg[1]);
++	if (!mapped || ace_pmsg_console_bind(&ace_pmsg_console, mapped, ACE_PMSG_BYTES)) {
++		return;
++	}
++	register_serial_functions(&ace_pmsg_serial_functions);
++	static const char ready[] = "ACEXNU pmsg serial ready\n";
++	for (unsigned int i = 0; i < sizeof(ready) - 1; i++) {
++		ace_pmsg_tx_data((uint8_t)ready[i]);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_ACE */
++
+ /*****************************************************************************/
+ 
+ /*
+@@ -925,7 +1010,9 @@
+ 
+ 	PE_parse_boot_argn("disable-uart-irq", &disable_uart_irq, sizeof(disable_uart_irq));
+ 
+-#if !defined(ARM64_BOARD_CONFIG_ACE)
++#if defined(ARM64_BOARD_CONFIG_ACE)
++	ace_pmsg_probe();
++#else
+ 	fbcon_probe();
+ #endif
+ 
+diff --git a/pexpert/arm/pe_ace_pmsg.c b/pexpert/arm/pe_ace_pmsg.c
+new file mode 100644
+--- /dev/null
++++ b/pexpert/arm/pe_ace_pmsg.c
+@@ -0,0 +1,95 @@
++/* SPDX-License-Identifier: MIT */
++#if defined(ARM64_BOARD_CONFIG_ACE)
++#include <pexpert/arm/ace_pmsg.h>
++#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
++#error "Ace pmsg producer requires little-endian accesses"
++#endif
++
++static int
++ace_pmsg_object_ok(const struct ace_pmsg_console *console)
++{
++	return console && (uintptr_t)console % _Alignof(struct ace_pmsg_console) == 0 &&
++	       (uintptr_t)console <= UINTPTR_MAX - sizeof(*console);
++}
++
++static int
++ace_pmsg_zone_ok(const volatile void *zone, size_t bytes)
++{
++	return zone && bytes == ACE_PMSG_BYTES && (uintptr_t)zone % 4 == 0 &&
++	       (uintptr_t)zone <= UINTPTR_MAX - bytes;
++}
++
++static int
++ace_pmsg_state(const volatile uint8_t *zone, uint32_t *start, uint32_t *size)
++{
++	const volatile uint32_t *header = (const volatile uint32_t *)zone;
++	if (header[0] != ACE_PMSG_SIGNATURE) {
++		return ACE_PMSG_HEADER;
++	}
++	*start = header[1];
++	*size = header[2];
++	if (*size > ACE_PMSG_CAPACITY || *start >= ACE_PMSG_CAPACITY ||
++	    (*size < ACE_PMSG_CAPACITY && *start != *size)) {
++		return ACE_PMSG_STATE;
++	}
++	return ACE_PMSG_OK;
++}
++
++int
++ace_pmsg_console_bind(struct ace_pmsg_console *console, volatile void *zone, size_t bytes)
++{
++	uint32_t start, size;
++	if (!ace_pmsg_object_ok(console) || !ace_pmsg_zone_ok(zone, bytes)) {
++		return ACE_PMSG_ARGUMENT;
++	}
++	if ((uintptr_t)console < (uintptr_t)zone + bytes &&
++	    (uintptr_t)zone < (uintptr_t)console + sizeof(*console)) {
++		return ACE_PMSG_ALIAS;
++	}
++	if (console->zone || console->bytes || console->busy) {
++		return ACE_PMSG_STATE;
++	}
++	int error = ace_pmsg_state(zone, &start, &size);
++	if (error) {
++		return error;
++	}
++	console->bytes = bytes;
++	console->zone = zone;
++	return ACE_PMSG_OK;
++}
++
++int
++ace_pmsg_console_putc(struct ace_pmsg_console *console, uint8_t byte)
++{
++	uint32_t expected = 0, start, size;
++	if (!ace_pmsg_object_ok(console)) {
++		return ACE_PMSG_ARGUMENT;
++	}
++	if (!console->zone) {
++		return ACE_PMSG_UNBOUND;
++	}
++	if (!ace_pmsg_zone_ok(console->zone, console->bytes)) {
++		return ACE_PMSG_ARGUMENT;
++	}
++	if (!__atomic_compare_exchange_n(&console->busy, &expected, 1, 0,
++	    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
++		return ACE_PMSG_BUSY;
++	}
++	int error = ace_pmsg_state(console->zone, &start, &size);
++	if (!error) {
++		console->zone[12u + start] = byte;
++		start = start + 1 == ACE_PMSG_CAPACITY ? 0 : start + 1;
++		if (size < ACE_PMSG_CAPACITY) {
++			size++;
++		}
++		/* Publish ordered data then metadata, with no promise of a complete
++		 * record if reset interrupts either of the two header stores. */
++		__atomic_thread_fence(__ATOMIC_RELEASE);
++		volatile uint32_t *header = (volatile uint32_t *)console->zone;
++		header[1] = start;
++		header[2] = size;
++	}
++	__atomic_store_n(&console->busy, 0, __ATOMIC_RELEASE);
++	return error;
++}
++#endif /* ARM64_BOARD_CONFIG_ACE */
+diff --git a/pexpert/pexpert/arm/ace_pmsg.h b/pexpert/pexpert/arm/ace_pmsg.h
+new file mode 100644
+--- /dev/null
++++ b/pexpert/pexpert/arm/ace_pmsg.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: MIT
++ * Caller-owned, ECC-free little-endian pmsg RAM. No mapping or initialization
++ * of unknown memory. Bind a zeroed, exclusively owned console before publish;
++ * the mapped zone must remain accessible and have no external writer. putc
++ * uses a nonblocking normal-RAM lock; recursive/concurrent output may drop.
++ * Successful return orders data/header stores, not atomic crash publication or
++ * proof of reset retention. Platform code must supply mapping and completion.
++ */
++#ifndef _PEXPERT_ARM_ACE_PMSG_H
++#define _PEXPERT_ARM_ACE_PMSG_H
++#include <stddef.h>
++#include <stdint.h>
++#define ACE_PMSG_BYTES 65536u
++#define ACE_PMSG_CAPACITY (ACE_PMSG_BYTES - 12u)
++#define ACE_PMSG_SIGNATURE UINT32_C(0x43474244)
++struct ace_pmsg_console {
++	volatile uint8_t *zone;
++	size_t bytes;
++	uint32_t busy;
++};
++enum ace_pmsg_result {
++	ACE_PMSG_OK = 0, ACE_PMSG_ARGUMENT = -1, ACE_PMSG_HEADER = -2,
++	ACE_PMSG_STATE = -3, ACE_PMSG_BUSY = -4, ACE_PMSG_UNBOUND = -5,
++	ACE_PMSG_ALIAS = -6
++};
++int ace_pmsg_console_bind(struct ace_pmsg_console *, volatile void *, size_t);
++int ace_pmsg_console_putc(struct ace_pmsg_console *, uint8_t);
++#endif
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -51,7 +51,8 @@
+ 	SERIAL_PI3_UART=0x4,
+ 	SERIAL_VMAPPLE_UART=0x8,
+ 	SERIAL_DCC_UART=0x10,
+-	SERIAL_SWEET_FBCON=0x20
++	SERIAL_SWEET_FBCON=0x20,
++	SERIAL_ACE_PMSG=0x40
+ } serial_device_t;
+ 
+ kern_return_t serial_irq_enable(serial_device_t device);
+diff --git a/pexpert/pexpert/arm/Makefile b/pexpert/pexpert/arm/Makefile
+--- a/pexpert/pexpert/arm/Makefile
++++ b/pexpert/pexpert/arm/Makefile
+@@ -16,7 +16,8 @@
+ 	dockchannel.h \
+ 	PL192_VIC.h \
+ 	protos.h \
+-	apple_uart_regs.h
++	apple_uart_regs.h \
++	ace_pmsg.h
+ 
+ # Headers installed into System.framework/PrivateHeaders (userspace internal SDK only).
+ INSTALL_SF_MD_LCL_LIST = $(PRIVATE_DATAFILES)
+diff --git a/pexpert/conf/files.arm64 b/pexpert/conf/files.arm64
+--- a/pexpert/conf/files.arm64
++++ b/pexpert/conf/files.arm64
+@@ -5,3 +5,4 @@
+ pexpert/arm/pe_init.c                  standard
+ pexpert/arm/pe_kprintf.c               standard
+ pexpert/arm/pe_serial.c                standard
++pexpert/arm/pe_ace_pmsg.c              standard

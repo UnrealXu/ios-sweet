@@ -1,0 +1,117 @@
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -16,6 +16,18 @@
+ #define NO_ECORE                  1
+ 
+ #define SWEET                     1
++
++/* Fixed Redmi framebuffer, independent of the generic ARM/GIC adaptations.
++ * A new platform must leave this disabled until its framebuffer mapping and
++ * ownership are established. Override with -DSWEET_HAS_EARLY_FB=0 for the
++ * headless bootstrap; this alone does NOT make a SWEET kernel Ace-compatible.
++ */
++#ifndef SWEET_HAS_EARLY_FB
++#define SWEET_HAS_EARLY_FB        1
++#endif
++#if SWEET_HAS_EARLY_FB != 0 && SWEET_HAS_EARLY_FB != 1
++#error "SWEET_HAS_EARLY_FB must be 0 or 1"
++#endif
+ 
+ /*
+  * All eight cores (six A55 + two A76) as one homogeneous SMP cluster:
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -513,7 +513,7 @@
+ 	mov		x20, x0
+ 	mov		x21, #0
+ 
+-#if defined(SWEET)
++#if defined(SWEET_HAS_EARLY_FB) && SWEET_HAS_EARLY_FB
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+ 	MOV64	x0, (0x9c000000 + 2368 * 4320)
+ 	mov		w1, #-1
+@@ -678,7 +678,7 @@
+ 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
+ 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
+ 
+-#if defined(SWEET)
++#if defined(SWEET_HAS_EARLY_FB) && SWEET_HAS_EARLY_FB
+ 	/*
+ 	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+ 	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1825,7 +1825,7 @@
+ #define ARM64_PHYSMAP_ALIGNMENT_PADDING (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE)
+ #endif
+ 
+-#if defined(SWEET)
++#if defined(SWEET_HAS_EARLY_FB) && SWEET_HAS_EARLY_FB
+ /*
+  * The reserved low-globals/kernel region is excluded from VM allocation.
+  * Use the otherwise empty 32MB block above low globals and below gVirtBase
+@@ -2179,7 +2179,7 @@
+ 
+ 	arm_set_user_tbi();
+ 
+-#if defined(SWEET)
++#if defined(SWEET_HAS_EARLY_FB) && SWEET_HAS_EARLY_FB
+ 	/* phystokv() must still refer to the bootstrap aperture here. */
+ 	sweet_early_map_final();
+ #endif
+@@ -2188,7 +2188,7 @@
+ 
+ 	ml_enable_monitor();
+ 
+-#if defined(SWEET)
++#if defined(SWEET_HAS_EARLY_FB) && SWEET_HAS_EARLY_FB
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+ 	sweet_early_relocate(SWEET_EARLY_FB_VA);
+ #endif
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -7,7 +7,7 @@
+  */
+ #include <arm64/sweet_early.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET_HAS_EARLY_FB) && SWEET_HAS_EARLY_FB
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+ 
+@@ -140,4 +140,4 @@
+ 	early_disabled = 1;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+-#endif /* SWEET */
++#endif /* SWEET_HAS_EARLY_FB */
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -6,7 +6,7 @@
+ #include <stdarg.h>
+ #include <stdint.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET_HAS_EARLY_FB) && SWEET_HAS_EARLY_FB
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+@@ -18,6 +18,13 @@
+ 	(void)stage;
+ 	(void)label;
+ }
++static inline void sweet_early_putc(char c) { (void)c; }
++static inline void sweet_early_panic(const char *fmt, va_list *args)
++{
++	(void)fmt;
++	(void)args;
++}
++static inline void sweet_early_relocate(uint64_t base) { (void)base; }
+ static inline void sweet_early_disable(void) {}
+ #endif
+ 

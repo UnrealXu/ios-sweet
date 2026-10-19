@@ -1,0 +1,26 @@
+diff --git a/pexpert/arm/pe_identify_machine.c b/pexpert/arm/pe_identify_machine.c
+--- a/pexpert/arm/pe_identify_machine.c
++++ b/pexpert/arm/pe_identify_machine.c
+@@ -164,6 +164,22 @@
+ 	/* Set the num / den pairs form the hz values. */
+ 	gPEClockFrequencyInfo.bus_clock_rate_num = gPEClockFrequencyInfo.bus_clock_rate_hz;
+ 	gPEClockFrequencyInfo.bus_clock_rate_den = 1;
++
++#if defined(ARM64_BOARD_CONFIG_ACE)
++	/* The architected timer is observed; peripheral bus clocks are not.
++	 * Do not invent a bus clock or divide by an absent DT property. */
++	if (gPEClockFrequencyInfo.timebase_frequency_hz != 13000000 ||
++	    gPEClockFrequencyInfo.timebase_frequency_hz != __builtin_arm_rsr64("CNTFRQ_EL0")) {
++		panic("ACE: invalid architectural timebase");
++	}
++	if (gPEClockFrequencyInfo.bus_clock_rate_hz == 0) {
++		gPEClockFrequencyInfo.bus_to_cpu_rate_num = 0;
++		gPEClockFrequencyInfo.bus_to_cpu_rate_den = 1;
++		gPEClockFrequencyInfo.bus_to_dec_rate_num = 0;
++		gPEClockFrequencyInfo.bus_to_dec_rate_den = 1;
++		return;
++	}
++#endif
+ 
+ 	gPEClockFrequencyInfo.bus_to_cpu_rate_num =
+ 	    (2 * gPEClockFrequencyInfo.cpu_clock_rate_hz) / gPEClockFrequencyInfo.bus_clock_rate_hz;
