@@ -77,6 +77,19 @@ jobs:
           set -euo pipefail
           bash build.sh 2>&1 | tee ../xnu-build.log | python3 -u ../tools/ci-build-output.py
 
+      - name: Verify Ace entry patch reached the linked kernel
+        if: env.MACHINE_CONFIG == 'ACE'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dxb/xnu/osfmk/arm64/ace_early_entry.h
+          config=$(printf '%s' "$KERNEL_CONFIG" | tr '[:upper:]' '[:lower:]')
+          kernel="dxb/fakeroot/System/Library/Kernels/kernel.$config.ace"
+          test -s "$kernel"
+          xcrun nm "$kernel" > ace-kernel.nm
+          grep -Eq '[[:space:]]_ace_early_marker_done$' ace-kernel.nm
+          grep -Eq '[[:space:]]_ace_early_bootargs_ready$' ace-kernel.nm
+
       - name: Preserve complete build log
         uses: actions/upload-artifact@v4
         if: always()
