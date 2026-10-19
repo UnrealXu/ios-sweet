@@ -1,0 +1,240 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -506,6 +506,8 @@
+ 	.globl EXT(start_first_cpu)
+ LEXT(start_first_cpu)
+ 
++#include "ace_early_entry.h"
++
+ 	// Unlock the core for debugging
+ 	msr		OSLAR_EL1, xzr
+ 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
+@@ -542,6 +544,10 @@
+ 	ldr		x22, [x20, BA_VIRT_BASE]			// Get the kernel virt base
+ 	ldr		x23, [x20, BA_PHYS_BASE]			// Get the kernel phys base
+ 	ldr		x24, [x20, BA_MEM_SIZE]				// Get the physical memory size
++#if defined(ARM64_BOARD_CONFIG_ACE)
++	.globl EXT(ace_early_bootargs_ready)
++LEXT(ace_early_bootargs_ready)
++#endif
+ 	adrp	x25, EXT(bootstrap_pagetables)@page	// Get the start of the page tables
+ 	ldr		x26, [x20, BA_BOOT_FLAGS]			// Get the kernel boot flags
+ 
+diff --git a/osfmk/arm64/genassym.c b/osfmk/arm64/genassym.c
+--- a/osfmk/arm64/genassym.c
++++ b/osfmk/arm64/genassym.c
+@@ -294,6 +294,10 @@
+ 	DECLARE("PAGE_MAX_SHIFT", PAGE_MAX_SHIFT);
+ 	DECLARE("PAGE_MAX_SIZE", PAGE_MAX_SIZE);
+ 
++	DECLARE("BA_REVISION", offsetof(struct boot_args, Revision));
++	DECLARE("BA_COMMAND_LINE", offsetof(struct boot_args, CommandLine));
++	DECLARE("BA_COMMAND_LINE_BYTES", sizeof(((struct boot_args *)0)->CommandLine));
++	DECLARE("BA_SIZE", sizeof(struct boot_args));
+ 	DECLARE("BA_VIRT_BASE", offsetof(struct boot_args, virtBase));
+ 	DECLARE("BA_PHYS_BASE", offsetof(struct boot_args, physBase));
+ 	DECLARE("BA_MEM_SIZE", offsetof(struct boot_args, memSize));
+diff --git a/osfmk/arm64/ace_early_entry.h b/osfmk/arm64/ace_early_entry.h
+--- /dev/null
++++ b/osfmk/arm64/ace_early_entry.h
+@@ -0,0 +1,199 @@
++/* ACE-only cold entry, inlined before OSLAR_EL1. No stack or calls.
++ * Native loader contract: valid BootArgs in exclusively transferred RAM;
++ * reviewed 0x48160000/64KiB pmsg is ordinary RAM, ECC0/type0, one writer.
++ * These checks do not establish firmware/DMA ownership or authenticate logs.
++ * x0 and x17..x30 are preserved; x1..x16 are cold-entry scratch registers.
++ */
++#if defined(ARM64_BOARD_CONFIG_ACE)
++	mrs x1, CurrentEL
++	cmp x1, #4
++	b.ne Lace_early_done
++	mrs x1, SCTLR_EL1
++	tbnz x1, #0, Lace_early_done
++	tbnz x1, #2, Lace_early_done
++	tbnz x1, #12, Lace_early_done
++	tbnz x1, #25, Lace_early_done
++	cbz x0, Lace_early_done
++	tst x0, #7
++	b.ne Lace_early_done
++	ldr w1, [x0, BA_REVISION]
++	movz w2, #2
++	movk w2, #2, lsl #16
++	cmp w1, w2
++	b.ne Lace_early_done
++	ldr x2, [x0, BA_PHYS_BASE]
++	ldr x3, [x0, BA_MEM_SIZE]
++	cbz x3, Lace_early_done
++	adds x3, x2, x3
++	b.cs Lace_early_done
++	mov x4, #1
++	lsl x4, x4, #40
++	cmp x3, x4
++	b.hi Lace_early_done
++	cmp x0, x2
++	b.lo Lace_early_done
++	adds x1, x0, #BA_SIZE
++	b.cs Lace_early_done
++	cmp x1, x3
++	b.hi Lace_early_done
++	movz x4, #0x4816, lsl #16
++	add x1, x4, #0x10, lsl #12
++	cmp x4, x3
++	b.hs Lace_early_disjoint
++	cmp x1, x2
++	b.hi Lace_early_done
++Lace_early_disjoint:
++	/* Find a bounded terminator before parsing any option. */
++	add x6, x0, #BA_COMMAND_LINE
++	mov x7, x6
++	mov x8, #BA_COMMAND_LINE_BYTES
++Lace_early_nul:
++	ldrb w1, [x7], #1
++	cbz w1, Lace_early_parse
++	subs x8, x8, #1
++	b.ne Lace_early_nul
++	b Lace_early_done
++Lace_early_parse:
++	sub x7, x7, #1
++	mov x12, #0
++	mov x13, #0
++Lace_early_token:
++	cmp x6, x7
++	b.hs Lace_early_options_done
++	ldrb w1, [x6]
++	cmp w1, #32
++	b.ne Lace_early_token_start
++	add x6, x6, #1
++	b Lace_early_token
++Lace_early_token_start:
++	mov x8, x6
++Lace_early_token_end:
++	cmp x6, x7
++	b.hs Lace_early_token_found
++	ldrb w1, [x6]
++	cmp w1, #32
++	b.eq Lace_early_token_found
++	add x6, x6, #1
++	b Lace_early_token_end
++Lace_early_token_found:
++	sub x9, x6, x8
++	cmp x9, #8
++	b.lo Lace_early_token
++	/* CommandLine need not align each token: assemble its first8 bytes. */
++	mov x10, #0
++	mov x14, #0
++Lace_early_key:
++	ldrb w1, [x8, x14]
++	lsl x15, x14, #3
++	lsl x1, x1, x15
++	orr x10, x10, x1
++	add x14, x14, #1
++	cmp x14, #8
++	b.ne Lace_early_key
++	movz x11, #0x6361
++	movk x11, #0x5f65, lsl #16
++	movk x11, #0x6d70, lsl #32
++	movk x11, #0x6773, lsl #48 /* ace_pmsg */
++	cmp x10, x11
++	b.ne Lace_early_run_key
++	tbnz x12, #0, Lace_early_done
++	cmp x9, #10
++	b.ne Lace_early_done
++	ldrb w1, [x8, #8]
++	cmp w1, #61
++	b.ne Lace_early_done
++	ldrb w1, [x8, #9]
++	cmp w1, #49
++	b.ne Lace_early_done
++	orr x12, x12, #1
++	b Lace_early_token
++Lace_early_run_key:
++	movz x11, #0x6361
++	movk x11, #0x5f65, lsl #16
++	movk x11, #0x7572, lsl #32
++	movk x11, #0x3d6e, lsl #48 /* ace_run= */
++	cmp x10, x11
++	b.ne Lace_early_token
++	tbnz x12, #1, Lace_early_done
++	cmp x9, #24
++	b.ne Lace_early_done
++	add x13, x8, #8
++	mov x14, #0
++Lace_early_hex:
++	ldrb w1, [x13, x14]
++	sub w11, w1, #48
++	cmp w11, #9
++	b.ls Lace_early_hex_ok
++	sub w11, w1, #97
++	cmp w11, #5
++	b.hi Lace_early_done
++Lace_early_hex_ok:
++	add x14, x14, #1
++	cmp x14, #16
++	b.ne Lace_early_hex
++	orr x12, x12, #2
++	b Lace_early_token
++Lace_early_options_done:
++	cmp x12, #3
++	b.ne Lace_early_done
++	/* Never initialize or repair an unknown persistent header. */
++	ldr w1, [x4]
++	movz w2, #0x4244
++	movk w2, #0x4347, lsl #16
++	cmp w1, w2
++	b.ne Lace_early_done
++	movz x5, #0xfff4
++	ldr w15, [x4, #4]
++	ldr w16, [x4, #8]
++	cmp x15, x5
++	b.hs Lace_early_done
++	cmp x16, x5
++	b.hi Lace_early_done
++	cmp x15, x16
++	b.hi Lace_early_done
++	cmp x16, x5
++	b.eq Lace_early_ring_ok
++	cmp x15, x16
++	b.ne Lace_early_done
++Lace_early_ring_ok:
++	add x4, x4, #12
++	adr x8, Lace_early_prefix
++	mov x9, #8
++	mov x14, #0
++Lace_early_append:
++	ldrb w1, [x8], #1
++	strb w1, [x4, x15]
++	add x15, x15, #1
++	cmp x15, x5
++	csel x15, xzr, x15, eq
++	add x16, x16, #1
++	cmp x16, x5
++	csel x16, x5, x16, hi
++	subs x9, x9, #1
++	b.ne Lace_early_append
++	cbnz x14, Lace_early_after_token
++	mov x8, x13
++	mov x9, #16
++	mov x14, #1
++	b Lace_early_append
++Lace_early_after_token:
++	cmp x14, #2
++	b.eq Lace_early_commit
++	adr x8, Lace_early_suffix
++	mov x9, #12
++	mov x14, #2
++	b Lace_early_append
++Lace_early_commit:
++	str w15, [x4, #-8]
++	str w16, [x4, #-4]
++	dsb sy
++	b Lace_early_done
++Lace_early_prefix:
++	.ascii "ACEXNU1:"
++Lace_early_suffix:
++	.ascii ": entry EL1\n"
++	.balign 4
++Lace_early_done:
++	.globl EXT(ace_early_marker_done)
++LEXT(ace_early_marker_done)
++#endif
