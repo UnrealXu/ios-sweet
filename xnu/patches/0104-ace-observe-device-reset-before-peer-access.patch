@@ -1,0 +1,27 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -218,13 +218,24 @@
+         if(!ao || !pdn || !top) {
+             printf("ACE UFS clocks: read-only map failed; no clock/reset writes\n");return false;
+         }
++        uint32_t r1=*(volatile const uint32_t *)(ao+0x90);
+         uint32_t a1=*(volatile const uint32_t *)ao,p1=*(volatile const uint32_t *)pdn;
+         uint32_t t1=*(volatile const uint32_t *)(top+0xf0),h1=*(volatile const uint32_t *)(top+0x10);
+         __builtin_arm_dsb(0xf);IODelay(1);
++        uint32_t r2=*(volatile const uint32_t *)(ao+0x90);
+         uint32_t a2=*(volatile const uint32_t *)ao,p2=*(volatile const uint32_t *)pdn;
+         uint32_t t2=*(volatile const uint32_t *)(top+0xf0),h2=*(volatile const uint32_t *)(top+0x10);
+         printf("ACE UFS clocks: AO=%08x/%08x PDN=%08x/%08x TOP0=%08x/%08x TOP14=%08x/%08x gated-AO=%03x/%03x gated-HCI=%u/%u gated-UFS=%u/%u\n",
+             a1,a2,p1,p2,h1,h2,t1,t2,a1&0x11f,a2&0x11f,p1&1,p2&1,(t1>>7)&1,(t2>>7)&1);
++        /* Exact shipping LK final transition calls its UFS teardown, which
++         * can clear AO+0x90 bit0; ATF reset service toggles the same bit.
++         * Observe it here before trusting a cached host UP/gear state. Do not
++         * change reset or infer that the device has acknowledged release.
++         */
++        printf("ACE UFS reset: AO90=%08x/%08x release-bit=%u/%u; read-only\n",r1,r2,r1&1,r2&1);
++        if(!(r1&1) || !(r2&1)) {
++            printf("ACE UFS reset: release not observed; cached link UP insufficient; no UIC or DMA\n");return false;
++        }
+         if((a1&0x11f) || (a2&0x11f) || (p1&1) || (p2&1) || (t1&0x80) || (t2&0x80) ||
+            (t1&0x87)!=(t2&0x87) || (h1&0x70000)!=(h2&0x70000) ||
+            !inherited_ready() || (rd(0x144)&3)!=3) {
