@@ -1,0 +1,41 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -493,7 +493,7 @@
+ #define DEBUG_BSDINIT ARM64_BOARD_CONFIG_ACE /* Undefined is0 in #if. */
+ 
+ #if DEBUG_BSDINIT
+-#define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
++#define bsd_init_kprintf(x, ...) printf("ACE bsd_init: " x, ## __VA_ARGS__)
+ #else
+ #define bsd_init_kprintf(x, ...)
+ #endif
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -72,13 +72,13 @@
+ void
+ IOKitInitializeTime( void )
+ {
+-	mach_timespec_t         t;
++	mach_timespec_t         t __attribute__((unused));
+ 
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
+-// RTC is not present on this target
+-#ifndef BCM2837
++// Ace currently registers no RTC backend; keep the existing calendar fallback.
++#if !defined(BCM2837) && !defined(ARM64_BOARD_CONFIG_ACE)
+ #if defined(ARM64_BOARD_CONFIG_ACE)
+ 	IOLog("ACE init: IORTC wait begin ticks=%llu ctl=%llx cval=%llx cnt=%llx\n",
+ 	    (unsigned long long)mach_absolute_time(),
+@@ -101,7 +101,7 @@
+ #endif
+ 
+ #if defined(ARM64_BOARD_CONFIG_ACE)
+-	IOLog("ACE init: calendar begin\n");
++	IOLog("ACE init: RTC backend unavailable; calendar begin without service wait\n");
+ #endif
+ #line 90
+ 	clock_initialize_calendar();
