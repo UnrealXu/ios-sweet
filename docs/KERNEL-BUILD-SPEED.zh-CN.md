@@ -29,3 +29,29 @@
 
 实现参考：[GitHub 缓存键与作用域](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching)、
 [ccache 的输入与编译器检查](https://ccache.dev/manual/4.10.html)。
+
+## 2026-10-20 实测
+
+相同 Ace 内核补丁集（至 0100）、macOS 13.5 / DEVELOPMENT / ACE 和相同
+Xcode/SDK；不包含队列等待，整轮执行按执行器日志首尾时间计算。
+
+| 方式 | Build | 整轮执行，含缓存恢复和保存 | 可缓存编译命中 |
+| --- | ---: | ---: | ---: |
+| [原完整构建 #19](https://github.com/UnrealXu/ios-sweet/actions/runs/39394334327) | 358 秒 | 398 秒 | 无缓存 |
+| [最终版首次填充编译缓存 #22](https://github.com/UnrealXu/ios-sweet/actions/runs/39399197726) | 325 秒 | 420 秒 | 0 / 1072 |
+| [最终版热缓存 #23](https://github.com/UnrealXu/ios-sweet/actions/runs/39400358312) | 172 秒 | 222 秒 | 1072 / 1072 |
+
+最终热缓存的 Build 缩短约 52%，整轮执行缩短约 44%。#22 复用了此前的
+KDK/源码缓存，但编译缓存是新填充的；完全没有依赖缓存时，首次预热还可能
+更慢。这个测量针对相同源码重复构建，实际修改代码后的命中率会变化。
+
+下载产物并核验归档 SHA256、构建来源和内核校验清单后，分别比较 #19、#22、
+#23 的 46 个非 CTF 段：代码、数据、地址、大小、标志和零填充布局均相同。
+CTF 类型元数据有差异，整文件哈希不同，不能宣称文件逐字节相同，也不构成
+真机/iOS 启动证明。`tools/ci-compare-kernels.py` 会明确报告这些差异。
+
+早期试验曾使用路径归一化，导致 `__FILE__` 字符串变化，已从最终配置移除。
+最终的基线内核 SHA256 为
+`58aa194aeaa9584d1f713b86d477db9d96f6f7339d81e404f26da58cd8bd3603`，
+热缓存内核 SHA256 为
+`114d2de54800e18e9a441a4b587171971a4d0601a0ce1ef2419a3d9f23ca9297`。
