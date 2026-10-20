@@ -1,0 +1,75 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -14,6 +14,7 @@
+ #include <mach/mach_time.h>
+ #include "AceUFSReadProtocol.h"
+ #include "AceUFSUICPolicy.h"
++#include "AceUFSBootHandoff.h"
+ extern "C" ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ 
+ /* Built-in board driver: declaration otherwise gated to MACH/PEXPERT private. */
+@@ -78,13 +79,30 @@
+         printf("ACE UFS read: inherited UTRL=%08x:%08x TM=%08x:%08x DBR=%08x/%08x AHIT=%08x HCS=%08x\n",rd(0x54),rd(0x50),rd(0x74),rd(0x70),rd(0x58),rd(0x78),rd(0x18),rd(0x30));
+         uint32_t codes[5]={rd(0x38),rd(0x3c),rd(0x40),rd(0x44),rd(0x48)};
+         printf("ACE UFS read: UIC snapshot PA=%08x DL=%08x NL=%08x TL=%08x DME=%08x IS=%08x\n",codes[0],codes[1],codes[2],codes[3],codes[4],rd(0x20));
+-        if(!ace_ufs_uic_empty_codes(codes)) {
+-            printf("ACE UFS read: meaningful/unknown UIC code; no queue writes\n");return;
+-        }
+         if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1) || rd(0x08)!=0x200 ||
+            (rd(0x34)&1)!=1 || (rd(0x30)&15)!=15 || !(rd(0)&0x1000000) ||
+            (rd(0)&31)!=31 || rd(0x58) || rd(0x78) || rd(0x18) || (rd(0x20)&0x70880)) {
+             printf("ACE UFS read: inherited-state gate refused; no queue writes\n");return;
++        }
++        if(!ace_ufs_uic_empty_codes(codes)) {
++            uint32_t first_status=rd(0x20);
++            if(!ace_ufs_boot_linereset(first_status,codes)) {
++                printf("ACE UFS read: meaningful/unknown UIC code; no queue writes\n");return;
++            }
++            /* The family driver reads UECPA once after LINK_STARTUP.
++             * Require the observed indication to actually clear, not just
++             * that the initial error code has a known name. One sample only. */
++            printf("ACE UFS read: startup LINERESET observed; resample after read-clear\n");
++            IODelay(1000);
++            uint32_t next[5]={rd(0x38),rd(0x3c),rd(0x40),rd(0x44),rd(0x48)};
++            uint32_t next_status=rd(0x20);
++            printf("ACE UFS read: post-LINERESET PA=%08x DL=%08x NL=%08x TL=%08x DME=%08x IS=%08x\n",next[0],next[1],next[2],next[3],next[4],next_status);
++            if(!ace_ufs_boot_linereset_cleared(first_status,codes,next_status,next) ||
++               (rd(0x34)&1)!=1 || (rd(0x30)&15)!=15 || rd(0x58) || rd(0x78) || rd(0x18)) {
++                printf("ACE UFS read: LINERESET repeated/other error/state changed; no queue writes\n");return;
++            }
++            for(unsigned i=0;i<5;i++) codes[i]=next[i];
++            printf("ACE UFS read: startup LINERESET cleared; inherited host still ready\n");
+         }
+         if(rd(0x20)&4) {
+             if(!ace_ufs_uic_empty_event(rd(0x20),codes)) {
+@@ -107,6 +125,9 @@
+             printf("ACE UFS read: invalid/foreign DMA page pa=%llx last=%x\n",pa,last);return;
+         }
+         printf("ACE UFS read: dedicated permanent DMA page pa=0x%llx bytes=%u, direct-address hypothesis\n",pa,ACE_UFS_ARENA);
++        if((rd(0x20)&0x70884) || (rd(0x34)&1)!=1 || (rd(0x30)&15)!=15 || rd(0x58) || rd(0x78) || rd(0x18)) {
++            printf("ACE UFS read: host changed during DMA allocation; no queue writes\n");return;
++        }
+         wr(0x24,0);wr(0x60,0);wr(0x80,0);
+         if(!wait(0x60,1,0) || !wait(0x80,1,0) || rd(0x58) || rd(0x78)) {
+             printf("ACE UFS read: queue stop failed; no doorbell\n");return;
+--- /dev/null
++++ b/iokit/Kernel/arm/AceUFSBootHandoff.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: MIT
++ * Recognize ONLY the observed startup LINERESET followed by empty errors.
++ * A classification is not link recovery or proof of a successful command. */
++#ifndef ACE_UFS_BOOT_HANDOFF_H
++#define ACE_UFS_BOOT_HANDOFF_H
++#include <stdint.h>
++static inline int ace_ufs_boot_linereset(uint32_t status,const uint32_t *codes) {
++    if(!codes || (status&0x70880) || codes[0]!=0x80000010u) return 0;
++    for(unsigned i=1;i<5;i++) if(codes[i]&0x7fffffff) return 0;
++    return 1;
++}
++static inline int ace_ufs_boot_linereset_cleared(uint32_t first_status,
++    const uint32_t *first,uint32_t next_status,const uint32_t *next) {
++    if(!ace_ufs_boot_linereset(first_status,first) || !next || (next_status&0x70880)) return 0;
++    for(unsigned i=0;i<5;i++) if(next[i]&0x7fffffff) return 0;
++    return 1;
++}
++#endif
