@@ -1,0 +1,14 @@
+--- a/iokit/Kernel/arm/AceUFSResetAttention.h
++++ b/iokit/Kernel/arm/AceUFSResetAttention.h
+@@ -7,8 +7,10 @@
+ static inline int ace_ufs_reset_attention_response(const uint8_t *r,size_t bytes,unsigned lun) {
+     if(!r || bytes!=512 || lun!=2 || r[0]!=0x21 || r[1] || r[2]!=lun || r[3] ||
+        r[4] || r[5] || r[6]>1 || r[7]!=2 || r[8] || r[9] || r[10] || r[11]!=20 || ace_ufs_be32(r+12) ||
+-       r[32] || r[33]!=18 || r[34]!=0x70 || r[36]!=6 || r[41]!=10 ||
++       r[32] || r[33]!=18 || (r[34]&0x7f)!=0x70 || r[36]!=6 || r[41]!=10 ||
+        r[46]!=0x29 || r[47]) return 0;
++    /* Actual111 codeF0 is fixed70 plus information VALIDbit7. Parse the
++     * response code independently, as scsi_normalize_sense does. */
+     return 1; /* Fixed18-byte sense, current reset UA06/29/00 only. */
+ }
+ #endif
