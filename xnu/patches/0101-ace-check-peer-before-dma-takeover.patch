@@ -1,0 +1,57 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -43,6 +43,7 @@
+ struct AceUFSReadProbe {
+     vm_offset_t mmio, dma;
+     uint64_t pa;
++    bool peer_read_issued;
+     uint32_t rd(unsigned off) {return *(volatile const uint32_t *)(mmio+off);}
+     void wr(unsigned off,uint32_t value) {*(volatile uint32_t *)(mmio+off)=value;__builtin_arm_dsb(0xf);}
+     bool wait(unsigned off,uint32_t mask,uint32_t value) {
+@@ -205,6 +206,38 @@
+            !inherited_ready() || (rd(0x144)&3)!=3) return -1;
+         return second>>28;
+     }
++    bool inspect_peer_transport_once() {
++        /* One read-only peer transaction, before taking firmware DMA queues.
++         * PA_CONNECTEDTXDATALANES is read by ufshcd_disable_tx_lcc(peer=true).
++         * No peer SET, power-mode transition, reset, retry or storage CDB.
++         * A failed read in inherited FAST mode does not alone prove dead PHY:
++         * some controllers require AUTO mode for peer access. Preserve failure.
++         */
++        if(peer_read_issued || rd(0x2240)!=0x00360000 || !inherited_ready() ||
++           rd(0x20)!=0 || (rd(0x144)&3)!=3 || inspect_vendor_link("before-peer-read")!=2 ||
++           !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) {
++            printf("ACE UFS peer: state/one-shot guard refused; no peer command or queue writes\n");return false;
++        }
++        peer_read_issued=true;
++        wr(0x94,0x15610000);wr(0x98,0);wr(0x9c,0);
++        uint64_t started=mach_absolute_time();wr(0x90,3); /* DME_PEER_GET */
++        bool complete=wait(0x20,0x400,0x400);
++        uint32_t status=rd(0x20),result=rd(0x98)&255,value=rd(0x9c);
++        printf("ACE UFS peer: DME_PEER_GET attr=1561 complete=%u rc=%02x value=%08x IS=%08x HCS=%08x ticks=%llu REFCLK=%08x\n",
++            (unsigned)complete,result,value,status,rd(0x30),mach_absolute_time()-started,rd(0x144));
++        if(!complete || status!=0x400 || result || (value!=1 && value!=2) ||
++           !inherited_ready() || (rd(0x144)&3)!=3) {
++            uint32_t words[5];snapshot("peer-read fault",words);
++            inspect_vendor_link("peer-read-failed");
++            printf("ACE UFS peer: response not verified; no retry, power-mode change or transfer queue writes\n");return false;
++        }
++        wr(0x20,0x400); /* Acknowledge only the verified UIC completion. */
++        if(inspect_vendor_link("after-peer-read")!=2) return false;
++        uint32_t words[5];uint32_t quiet=snapshot("peer-read settled",words);
++        if(!ace_ufs_cold_final_ready(quiet,words) || !inherited_ready() || (rd(0x144)&3)!=3) return false;
++        printf("ACE UFS peer: single peer lane response verified; descriptor DMA and NOP still unproven\n");
++        return true;
++    }
+     bool finish_link_configuration() {
+         uint32_t value=0,ignored=0;
+         /* Shipped MTK post_link clock gating bits, preserving other fields. */
+@@ -229,6 +262,7 @@
+         }
+         if(link==2) {
+             printf("ACE UFS init: inherited stable UP/idle; skip pre-link and LINK_STARTUP\n");
++            if(!inspect_peer_transport_once()) return false;
+             return finish_link_configuration();
+         }
+         printf("ACE UFS init: begin MTK local pre-link and one LINK_STARTUP; no reset/SMC\n");
