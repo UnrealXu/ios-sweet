@@ -1,0 +1,131 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -44,7 +44,6 @@
+     vm_offset_t mmio, dma;
+     uint64_t pa;
+     bool peer_read_issued;
+-    bool peer_mode_attempted;
+     uint32_t rd(unsigned off) {return *(volatile const uint32_t *)(mmio+off);}
+     void wr(unsigned off,uint32_t value) {*(volatile uint32_t *)(mmio+off)=value;__builtin_arm_dsb(0xf);}
+     bool wait(unsigned off,uint32_t mask,uint32_t value) {
+@@ -154,7 +153,7 @@
+         return true;
+     }
+     bool init_uic(unsigned op,uint32_t attr,uint32_t value,uint32_t &answer) {
+-        bool get=op==1 && (attr==0xd0a6 || attr==0xd0a1);
++        bool get=op==1 && (attr==0xd0a6 || attr==0xd0a1 || attr==0xd0a8);
+         bool set=op==2 && (attr==0xd0a6 || attr==0xd0a1 || ((attr==0xd0a8 || attr==0x155e) && value==0));
+         bool startup=op==0x16 && attr==0 && value==0;
+         if(!(get || set || startup) || (get && value) || !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) {
+@@ -207,57 +206,54 @@
+            !inherited_ready() || (rd(0x144)&3)!=3) return -1;
+         return second>>28;
+     }
+-    bool read_peer_mode_state(const char *stage,uint32_t values[3]) {
+-        const unsigned attributes[3]={0x1571,0x1568,0x1583};
+-        for(unsigned i=0;i<3;i++) {
+-            if(!inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) return false;
+-            wr(0x94,attributes[i]<<16);wr(0x98,0);wr(0x9c,0);wr(0x90,1);
+-            bool complete=wait(0x20,0x400,0x400);
+-            uint32_t status=rd(0x20),result=rd(0x98)&255;
+-            values[i]=rd(0x9c);
+-            printf("ACE UFS peer-auto: %s attr=%04x complete=%u rc=%02x value=%08x IS=%08x HCS=%08x\n",
+-                stage,attributes[i],(unsigned)complete,result,values[i],status,rd(0x30));
+-            if(!complete || result || status!=0x400 || !inherited_ready() || (rd(0x144)&3)!=3) {
+-                uint32_t words[5];snapshot("peer-auto local read fault",words);return false;
+-            }
+-            wr(0x20,0x400);
+-        }
+-        return true;
+-    }
+-    bool prepare_peer_auto_mode_once() {
+-        /* Restricted experiment derived from ufshcd_dme_get_attr's AUTO-mode
+-         * workaround. Its applicability to this MTK handoff is NOT proven.
+-         * Change only PA_PWRMODE, retaining the already negotiated gears and
+-         * lanes. No re-negotiation of gear/lanes, peer SET, reset or SMC.
++    bool inspect_platform_clocks() {
++        /* Actual Ace FDT syscons; pinned mt6895-peri gates have set/clr at
++         * +4/+8, status at +0 (1=gated). Read status only, never gate/reset.
++         * Top CFG0 +0x10 holds HAXI select; CFG14 +0xf0 UFS select/gate.
+          */
+-        if(peer_mode_attempted || peer_read_issued || rd(0x2240)!=0x00360000 ||
+-           !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3 ||
+-           inspect_vendor_link("before-peer-auto")!=2 || !inherited_ready() ||
+-           rd(0x20)!=0 || (rd(0x144)&3)!=3) return false;
+-        peer_mode_attempted=true;
+-        uint32_t before[3]={},after[3]={};
+-        if(!read_peer_mode_state("before",before) || before[0]!=0x11 || before[1]!=4 || before[2]!=4 ||
+-           !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) {
+-            printf("ACE UFS peer-auto: unsupported inherited mode/gears; no power-mode SET\n");return false;
+-        }
+-        wr(0x94,0x15710000);wr(0x98,0);wr(0x9c,0x44);
+-        uint64_t started=mach_absolute_time();wr(0x90,2); /* PA_PWRMODE FASTAUTO/FASTAUTO */
+-        bool complete=wait(0x20,0x410,0x410); /* UCCS alone is insufficient. */
+-        uint32_t status=rd(0x20),result=rd(0x98)&255,hcs=rd(0x30);
+-        printf("ACE UFS peer-auto: SET 11->44 complete=%u rc=%02x IS=%08x HCS=%08x UPMCRS=%u ticks=%llu REFCLK=%08x\n",
+-            (unsigned)complete,result,status,hcs,(hcs>>8)&7,mach_absolute_time()-started,rd(0x144));
+-        if(!complete || result || status!=0x410 || ((hcs>>8)&7)!=1 ||
++        if(rd(0x2240)!=0x00360000 || !inherited_ready() || (rd(0x144)&3)!=3) return false;
++        vm_offset_t ao=ml_io_map_with_prot(0x112b8000,0x1000,VM_PROT_READ);
++        vm_offset_t pdn=ml_io_map_with_prot(0x112bc000,0x1000,VM_PROT_READ);
++        vm_offset_t top=ml_io_map_with_prot(0x10000000,0x1000,VM_PROT_READ);
++        if(!ao || !pdn || !top) {
++            printf("ACE UFS clocks: read-only map failed; no clock/reset writes\n");return false;
++        }
++        uint32_t a1=*(volatile const uint32_t *)ao,p1=*(volatile const uint32_t *)pdn;
++        uint32_t t1=*(volatile const uint32_t *)(top+0xf0),h1=*(volatile const uint32_t *)(top+0x10);
++        __builtin_arm_dsb(0xf);IODelay(1);
++        uint32_t a2=*(volatile const uint32_t *)ao,p2=*(volatile const uint32_t *)pdn;
++        uint32_t t2=*(volatile const uint32_t *)(top+0xf0),h2=*(volatile const uint32_t *)(top+0x10);
++        printf("ACE UFS clocks: AO=%08x/%08x PDN=%08x/%08x TOP0=%08x/%08x TOP14=%08x/%08x gated-AO=%03x/%03x gated-HCI=%u/%u gated-UFS=%u/%u\n",
++            a1,a2,p1,p2,h1,h2,t1,t2,a1&0x11f,a2&0x11f,p1&1,p2&1,(t1>>7)&1,(t2>>7)&1);
++        if((a1&0x11f) || (a2&0x11f) || (p1&1) || (p2&1) || (t1&0x80) || (t2&0x80) ||
++           (t1&0x87)!=(t2&0x87) || (h1&0x70000)!=(h2&0x70000) ||
+            !inherited_ready() || (rd(0x144)&3)!=3) {
+-            uint32_t words[5];snapshot("peer-auto transition fault",words);
+-            inspect_vendor_link("peer-auto-failed");
+-            printf("ACE UFS peer-auto: transition unverified; no retry, peer command or DMA\n");return false;
+-        }
+-        wr(0x20,0x410); /* Only verified command and power-mode completions. */
+-        if(!read_peer_mode_state("after",after) || after[0]!=0x44 || after[1]!=before[1] || after[2]!=before[2] ||
+-           inspect_vendor_link("after-peer-auto")!=2) return false;
+-        uint32_t words[5];uint32_t quiet=snapshot("peer-auto settled",words);
++            printf("ACE UFS clocks: gated/unstable inherited clocks; no clock writes or peer command\n");return false;
++        }
++        printf("ACE UFS clocks: sampled gates enabled; frequencies and PHY still unproven\n");
++        return true;
++    }
++    bool adopt_active_unipro() {
++        if(!inspect_platform_clocks() || peer_read_issued || !inherited_ready() || rd(0x20)!=0 ||
++           inspect_vendor_link("before-active-LPM")!=2) return false;
++        uint32_t powerdown=0,savepower=0,ignored=0,afterdown=0,afterpower=0;
++        if(!init_uic(1,0xd0a8,0,powerdown) || !init_uic(1,0xd0a6,0,savepower)) return false;
++        printf("ACE UFS LPM: before powerdown=%08x savepower=%08x; inherited UP path\n",powerdown,savepower);
++        if(powerdown>1 || savepower==0xffffffffu) {
++            printf("ACE UFS LPM: unknown state; no LPM SET or peer command\n");return false;
++        }
++        /* Shipped MTK pre_link leaves UniPro LPM and clears deep-stall.
++         * Apply only an actually asserted bit, keeping the UP link. No
++         * LINK_STARTUP, PA_PWRMODE, lane/gear change, reset or SMC.
++         */
++        if(powerdown && !init_uic(2,0xd0a8,0,ignored)) return false;
++        if((savepower&0x40) && !init_uic(2,0xd0a6,savepower&~0x40u,ignored)) return false;
++        if(!init_uic(1,0xd0a8,0,afterdown) || !init_uic(1,0xd0a6,0,afterpower)) return false;
++        printf("ACE UFS LPM: after powerdown=%08x savepower=%08x changed=%u\n",afterdown,afterpower,(unsigned)(powerdown || (savepower&0x40)));
++        if(afterdown || afterpower!=(savepower&~0x40u) || inspect_vendor_link("after-active-LPM")!=2) return false;
++        uint32_t words[5];uint32_t quiet=snapshot("active-LPM settled",words);
+         if(!ace_ufs_cold_final_ready(quiet,words) || !inherited_ready() || (rd(0x144)&3)!=3) return false;
+-        printf("ACE UFS peer-auto: FASTAUTO mode and unchanged gears verified; peer response still required\n");
++        printf("ACE UFS LPM: active controls verified; peer response still required\n");
+         return true;
+     }
+     bool inspect_peer_transport_once() {
+@@ -316,7 +312,7 @@
+         }
+         if(link==2) {
+             printf("ACE UFS init: inherited stable UP/idle; skip pre-link and LINK_STARTUP\n");
+-            if(!prepare_peer_auto_mode_once() || !inspect_peer_transport_once()) return false;
++            if(!adopt_active_unipro() || !inspect_peer_transport_once()) return false;
+             return finish_link_configuration();
+         }
+         printf("ACE UFS init: begin MTK local pre-link and one LINK_STARTUP; no reset/SMC\n");
