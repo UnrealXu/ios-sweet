@@ -9,6 +9,9 @@
   Local single-file cross-compiles are useful before spending a CI run.
 - Subsequent kernel iterations default to workflow `build_mode=cached` and
   `diagnostic_artifacts=false`. Use the native XNU CCACHE interface and keyed
+  caches on the branch containing the current workflow and kernel patches
+  (currently `UnrealXu/ios-sweet:codex/ace-initial-platform`). Do not dispatch an
+  older default-branch workflow that lacks the cached mode. Use
   source/KDK caches; reset restored sources and reapply current patches each
   time. Never cache fakeroot, generated XNU headers, raw build objects or linked
   kernels as a shortcut. Record real cache hits, build time and artifact hashes.
