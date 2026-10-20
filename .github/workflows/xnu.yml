@@ -15,11 +15,21 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+      build_mode:
+        description: cached reuses dependency/compiler caches; full bypasses them
+        type: choice
+        options: [cached, full]
+        default: cached
+      diagnostic_artifacts:
+        description: Also upload the local compile tree and KDK symbol inventory
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
       - "xnu/patches/**"
       - ".github/workflows/xnu.yml"
+      - "tools/ci-build-cache.py"
 
 concurrency:
   group: xnu-${{ github.ref }}
@@ -31,6 +41,7 @@ env:
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
+  BUILD_MODE: ${{ inputs.build_mode || 'cached' }}
 
 jobs:
   build:
@@ -55,7 +66,7 @@ jobs:
 
       - name: Deps
         run: |
-          brew install jq gum bash cmake ninja
+          brew install jq gum bash cmake ninja ccache
           # build.sh only checks that xcodes exists (Xcode is preinstalled); no bottle on macOS 14
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
@@ -67,6 +78,39 @@ jobs:
           xcodebuild -version
           xcrun --find iig
 
+      - name: Identify compiler and SDK
+        id: cache-identity
+        run: python3 tools/ci-build-cache.py identity
+
+      - name: Restore source and KDK cache
+        if: env.BUILD_MODE == 'cached'
+        uses: actions/cache@v4
+        with:
+          path: |
+            dxb/xnu
+            dxb/bootstrap_cmds
+            dxb/dtrace
+            dxb/AvailabilityVersions
+            dxb/Libsystem
+            dxb/libplatform
+            dxb/libdispatch
+            .ci-cache/kdks
+          key: xnu-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ steps.cache-identity.outputs.toolchain }}-${{ hashFiles('tools/ci-build-cache.py', '.github/workflows/xnu.yml') }}
+
+      - name: Restore compiler cache
+        if: env.BUILD_MODE == 'cached'
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/ccache
+          key: xnu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.MACOS_VERSION }}-${{ env.KERNEL_CONFIG }}-${{ env.MACHINE_CONFIG }}-${{ env.DXB_SHA }}-${{ steps.cache-identity.outputs.toolchain }}-${{ hashFiles('tools/ci-build-cache.py', '.github/workflows/xnu.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            xnu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.MACOS_VERSION }}-${{ env.KERNEL_CONFIG }}-${{ env.MACHINE_CONFIG }}-${{ env.DXB_SHA }}-${{ steps.cache-identity.outputs.toolchain }}-${{ hashFiles('tools/ci-build-cache.py', '.github/workflows/xnu.yml') }}-
+
+      - name: Prepare fresh sources and compiler cache
+        env:
+          SELECTED_BUILD_MODE: ${{ env.BUILD_MODE }}
+        run: python3 tools/ci-build-cache.py prepare --mode "$SELECTED_BUILD_MODE"
+
       - name: Build
         working-directory: dxb
         env:
@@ -74,8 +118,16 @@ jobs:
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          set +e
+          build_started=$(date +%s)
           bash build.sh 2>&1 | tee ../xnu-build.log | python3 -u ../tools/ci-build-output.py
+          build_status=$?
+          build_seconds=$(($(date +%s) - build_started))
+          python3 ../tools/ci-build-cache.py report --workspace "$GITHUB_WORKSPACE" --mode "$BUILD_MODE" --seconds "$build_seconds" --status "$build_status"
+          report_status=$?
+          if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+          exit "$report_status"
 
       - name: Verify Ace entry patch reached the linked kernel
         if: env.MACHINE_CONFIG == 'ACE'
@@ -90,16 +142,41 @@ jobs:
           grep -Eq '[[:space:]]_ace_early_marker_done$' ace-kernel.nm
           grep -Eq '[[:space:]]_ace_early_bootargs_ready$' ace-kernel.nm
 
+      - name: Collect verified kernel first
+        run: |
+          config=$(printf '%s' "$KERNEL_CONFIG" | tr '[:upper:]' '[:lower:]')
+          machine=$(printf '%s' "$MACHINE_CONFIG" | tr '[:upper:]' '[:lower:]')
+          kernel="dxb/fakeroot/System/Library/Kernels/kernel.$config.$machine"
+          test -s "$kernel"
+          mkdir -p kernel-out
+          cp "$kernel" kernel-out/
+          cp build-metrics.json kernel-out/
+          (cd kernel-out && shasum -a 256 kernel.* > SHA256SUMS)
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('kernel-out/build-provenance.json').write_text(json.dumps({key: os.environ[key] for key in ['GITHUB_SHA', 'GITHUB_RUN_ID', 'DXB_SHA', 'BUILD_MODE', 'MACOS_VERSION', 'KERNEL_CONFIG', 'MACHINE_CONFIG']}, indent=2) + '\n')
+          PY
+
+      - name: Upload verified kernel immediately
+        uses: actions/upload-artifact@v4
+        with:
+          name: xnu-kernel
+          path: kernel-out/
+          if-no-files-found: error
+
       - name: Preserve complete build log
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: xnu-build-log
-          path: xnu-build.log
+          path: |
+            xnu-build.log
+            build-metrics.json
           retention-days: 7
 
       - name: Package build tree for local compiles
-        if: always()
+        if: always() && (env.BUILD_MODE == 'full' || inputs.diagnostic_artifacts == true)
         run: |
           # Generated headers, config option headers, mig output and the patched
           # source: enough to re-run any single compile command from the log locally.
@@ -114,14 +191,14 @@ jobs:
           ls -la buildtree.tgz
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && (env.BUILD_MODE == 'full' || inputs.diagnostic_artifacts == true)
         with:
           name: xnu-buildtree
           path: buildtree.tgz
           retention-days: 7
 
       - name: Inspect closed KDK support libs
-        if: always()
+        if: always() && (env.BUILD_MODE == 'full' || inputs.diagnostic_artifacts == true)
         run: |
           mkdir -p out/kdk-libs
           for lib in /Library/Developer/KDKs/*/System/Library/KernelSupport/lib*.a; do
@@ -132,17 +209,9 @@ jobs:
           done
           ls -la out/kdk-libs
 
-      - name: Collect
-        if: always()
-        run: |
-          mkdir -p out
-          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
-          ls -la out
-          (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
-
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && (env.BUILD_MODE == 'full' || inputs.diagnostic_artifacts == true)
         with:
-          name: xnu-kernel
-          path: out/
+          name: xnu-kdk-libs
+          path: out/kdk-libs/
           if-no-files-found: warn
