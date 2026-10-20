@@ -1,0 +1,100 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -13,6 +13,7 @@
+ }
+ #include <mach/mach_time.h>
+ #include "AceUFSReadProtocol.h"
++#include "AceUFSUICPolicy.h"
+ extern "C" ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ 
+ /* Built-in board driver: declaration otherwise gated to MACH/PEXPERT private. */
+@@ -70,15 +71,30 @@
+         uint32_t ocs=*(uint32_t *)(a+8)&255;uint8_t *r=a+ACE_UFS_RESPONSE;
+         uint32_t status=rd(0x20);wr(0x20,status&1); /* W1C this completed transfer only. */
+         printf("ACE UFS read: complete op=%u OCS=%02x type=%02x flags=%02x lun=%02x tag=%02x response=%02x status=%02x residual=%u sense=%02x/%02x/%02x IS=%08x\n",op,ocs,r[0],r[1],r[2],r[3],r[6],r[7],ace_ufs_be32(r+12),r[36]&15,r[46],r[47],status);
+-        if(ocs || (status&0x70084) || r[0]!=(op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || r[6] || r[1] || (len && ace_ufs_be32(r+12))) return -5;
++        if(ocs || (status&0x70884) || r[0]!=(op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || r[6] || r[1] || (len && ace_ufs_be32(r+12))) return -5;
+         return r[7]==0?0:r[7]==2?1:-6; /* CHECK CONDITION is not transport success. */
+     }
+     void run() {
+         printf("ACE UFS read: inherited UTRL=%08x:%08x TM=%08x:%08x DBR=%08x/%08x AHIT=%08x HCS=%08x\n",rd(0x54),rd(0x50),rd(0x74),rd(0x70),rd(0x58),rd(0x78),rd(0x18),rd(0x30));
++        uint32_t codes[5]={rd(0x38),rd(0x3c),rd(0x40),rd(0x44),rd(0x48)};
++        printf("ACE UFS read: UIC snapshot PA=%08x DL=%08x NL=%08x TL=%08x DME=%08x IS=%08x\n",codes[0],codes[1],codes[2],codes[3],codes[4],rd(0x20));
++        if(!ace_ufs_uic_empty_codes(codes)) {
++            printf("ACE UFS read: meaningful/unknown UIC code; no queue writes\n");return;
++        }
+         if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1) || rd(0x08)!=0x200 ||
+            (rd(0x34)&1)!=1 || (rd(0x30)&15)!=15 || !(rd(0)&0x1000000) ||
+-           (rd(0)&31)!=31 || rd(0x58) || rd(0x78) || rd(0x18) || (rd(0x20)&0x70084)) {
++           (rd(0)&31)!=31 || rd(0x58) || rd(0x78) || rd(0x18) || (rd(0x20)&0x70880)) {
+             printf("ACE UFS read: inherited-state gate refused; no queue writes\n");return;
++        }
++        if(rd(0x20)&4) {
++            if(!ace_ufs_uic_empty_event(rd(0x20),codes)) {
++                printf("ACE UFS read: meaningful/unknown UIC code; no queue writes\n");return;
++            }
++            printf("ACE UFS read: empty latched UIC event; acknowledge IS.UIC_ERROR once\n");
++            wr(0x20,4);
++            if(!wait(0x20,0x70884,0) || (rd(0x30)&15)!=15 || rd(0x58) || rd(0x78)) {
++                printf("ACE UFS read: UIC event reasserted/state changed; no queue writes\n");return;
++            }
+         }
+         dma=0;
+         if(kmem_alloc_contig(kernel_map,&dma,ACE_UFS_ARENA,0x3fff,0,0,
+@@ -96,21 +112,21 @@
+             printf("ACE UFS read: queue stop failed; no doorbell\n");return;
+         }
+         wr(0x50,(uint32_t)pa);wr(0x54,(uint32_t)(pa>>32));wr(0x60,1);
+-        if(rd(0x50)!=(uint32_t)pa || rd(0x54)!=(uint32_t)(pa>>32) || !wait(0x60,1,1) || !(rd(0x30)&2)) {
++        if(rd(0x50)!=(uint32_t)pa || rd(0x54)!=(uint32_t)(pa>>32) || !wait(0x60,1,1) || !wait(0x30,2,2)) {
+             printf("ACE UFS read: queue adoption failed; no doorbell\n");return;
+         }
+         if(command(ACE_UFS_NOP)) return;
+         printf("ACE UFS read: genuine NOP response verified; high-address descriptor DMA complete\n");
+-        int rc=command(ACE_UFS_TUR);
+-        if(rc==1) rc=command(ACE_UFS_TUR); /* Consume one inherited unit attention. */
++        int rc=command(ACE_UFS_TUR,2);
++        if(rc==1) rc=command(ACE_UFS_TUR,2); /* Consume one inherited unit attention. */
+         if(rc) return;
+-        if(command(ACE_UFS_CAPACITY)) return;
++        if(command(ACE_UFS_CAPACITY,2)) return;
+         uint8_t *b=(uint8_t *)(dma+ACE_UFS_DATA);uint64_t lastBlock=ace_ufs_be64(b);uint32_t block=ace_ufs_be32(b+8);
+-        printf("ACE UFS read: LUN0 last-lba=0x%llx block-bytes=%u capacity-response-crc=%08x\n",lastBlock,block,ace_ufs_crc32(b,32));
++        printf("ACE UFS read: LUN2 last-lba=0x%llx block-bytes=%u capacity-response-crc=%08x\n",lastBlock,block,ace_ufs_crc32(b,32));
+         if(lastBlock<1 || lastBlock==UINT64_MAX || (block!=4096 && block!=512)) return;
+         for(unsigned lba=0;lba<=1;lba++) {
+-            if(command(ACE_UFS_BLOCK,0,lba,block)) return;
+-            printf("ACE UFS read: LUN0 block%u CRC32=%08x first16=",lba,ace_ufs_crc32(b,block));
++            if(command(ACE_UFS_BLOCK,2,lba,block)) return;
++            printf("ACE UFS read: LUN2 block%u CRC32=%08x first16=",lba,ace_ufs_crc32(b,block));
+             for(unsigned i=0;i<16;i++) printf("%02x",b[i]);printf(" MBR-signature=%02x%02x\n",b[510],b[511]);
+             if(lba==1 && !memcmp(b,"EFI PART",8)) {
+                 uint32_t n=(uint32_t)b[12]|(uint32_t)b[13]<<8|(uint32_t)b[14]<<16|(uint32_t)b[15]<<24;
+@@ -121,7 +137,7 @@
+                 }
+             }
+         }
+-        printf("ACE UFS read: bounded LUN0 blocks0/1 complete; no media published, no storage writes\n");
++        printf("ACE UFS read: bounded LUN2 blocks0/1 complete; no media published, no storage writes\n");
+     }
+ };
+ 
+--- /dev/null
++++ b/iokit/Kernel/arm/AceUFSUICPolicy.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: MIT
++ * Classify an empty latched UIC event only. No hardware access or recovery. */
++#ifndef ACE_UFS_UIC_POLICY_H
++#define ACE_UFS_UIC_POLICY_H
++#include <stdint.h>
++static inline int ace_ufs_uic_empty_codes(const uint32_t *codes) {
++    if(!codes) return 0;
++    /* Only zero/error-valid-with-no-code. Reject even reserved unknown bits;
++     * never classify PHY lane/LINERESET, DL/NL/TL/DME codes as empty. */
++    for(unsigned i=0;i<5;i++) if(codes[i]&0x7fffffff) return 0;
++    return 1;
++}
++static inline int ace_ufs_uic_empty_event(uint32_t status,const uint32_t *codes) {
++    return (status&4) && !(status&0x70880) && ace_ufs_uic_empty_codes(codes);
++}
++#endif
