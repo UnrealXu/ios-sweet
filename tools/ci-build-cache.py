@@ -63,8 +63,10 @@ def prepare(workspace, mode):
         cache.mkdir(parents=True, exist_ok=True)
         config = workspace / '.ci-cache/ccache.conf'
         config.write_text('compiler_check = content\nsloppiness =\nmax_size = 1G\n')
+        # Hosted jobs use the same workspace path. Do not rewrite __FILE__
+        # strings just to enable relocatable caches; preserve uncached output.
         values = dict(CCACHE=shutil.which('ccache'), CCACHE_DIR=str(cache),
-                      CCACHE_BASEDIR=str(workspace), CCACHE_COMPILERCHECK='content',
+                      CCACHE_BASEDIR='', CCACHE_COMPILERCHECK='content',
                       CCACHE_CONFIGPATH=str(config))
         if not values['CCACHE']:
             raise ValueError('ccache was not installed')
