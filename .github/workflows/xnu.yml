@@ -96,6 +96,9 @@ jobs:
             dxb/libdispatch
             .ci-cache/kdks
           key: xnu-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ steps.cache-identity.outputs.toolchain }}-${{ hashFiles('tools/ci-build-cache.py', '.github/workflows/xnu.yml') }}
+          # Only pristine-reset source repos and KDKs may cross recipe revisions.
+          restore-keys: |
+            xnu-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ steps.cache-identity.outputs.toolchain }}-
 
       - name: Restore compiler cache
         if: env.BUILD_MODE == 'cached'
