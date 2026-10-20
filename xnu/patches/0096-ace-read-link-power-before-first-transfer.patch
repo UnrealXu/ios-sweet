@@ -1,0 +1,55 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -80,6 +80,7 @@
+             for(unsigned i=0;i<512;i++) if(r[i]==0xa5) poison++;
+             printf("ACE UFS read: fault op=%u elapsed-ticks=%llu HCS=%08x HCE=%08x UTRL=%08x:%08x DBR=%08x RSR=%08x AHIT=%08x\n",op,mach_absolute_time()-submitted,rd(0x30),rd(0x34),rd(0x54),rd(0x50),rd(0x58),rd(0x60),rd(0x18));
+             printf("ACE UFS read: fault descriptor0=%08x descriptor2=%08x UCD=%08x:%08x request-crc=%08x/%08x response-poison=%u/512 UICCMD=%08x ARG=%08x/%08x/%08x\n",*(uint32_t *)a,*(uint32_t *)(a+8),*(uint32_t *)(a+20),*(uint32_t *)(a+16),request_crc,ace_ufs_crc32(a+ACE_UFS_UCD,32),poison,rd(0x90),rd(0x94),rd(0x98),rd(0x9c));
++            printf("ACE UFS link: transfer fault REFCLK=%08x XOUFS=%08x\n",rd(0x144),rd(0x140));
+             uint32_t error_words[5];
+             snapshot("command fault sample1",error_words);
+             IODelay(1000);
+@@ -99,6 +100,36 @@
+     }
+     bool inherited_ready() {
+         return (rd(0x34)&1)==1 && (rd(0x30)&15)==15 && !rd(0x58) && !rd(0x78) && !rd(0x18);
++    }
++    bool inspect_link_power() {
++        uint32_t refclk=rd(0x144);
++        printf("ACE UFS link: inherited REFCLK=%08x XOUFS=%08x HCS=%08x UICCMD=%08x ARG=%08x/%08x/%08x\n",refclk,rd(0x140),rd(0x30),rd(0x90),rd(0x94),rd(0x98),rd(0x9c));
++        if((refclk&3)!=3) {
++            printf("ACE UFS link: reference clock request/ack not both on; no UIC/queue writes\n");return false;
++        }
++        /* Current PA power mode and negotiated gears; local DME_GET only.
++         * No PA_PWRMODE SET, peer command, link startup, reset or SMC. */
++        static const uint32_t attributes[3]={0x1571,0x1568,0x1583};
++        wr(0x24,0); /* Poll owned completions; no UFS IRQ handler is installed. */
++        for(unsigned i=0;i<3;i++) {
++            if(!inherited_ready() || rd(0x20)!=0) {
++                printf("ACE UFS link: host not quiet before DME_GET; no queue writes\n");return false;
++            }
++            wr(0x94,attributes[i]<<16);wr(0x98,0);wr(0x9c,0);
++            uint64_t started=mach_absolute_time();wr(0x90,1);
++            if(!wait(0x20,0x400,0x400)) {
++                printf("ACE UFS link: DME_GET timeout attr=%04x IS=%08x HCS=%08x REFCLK=%08x\n",attributes[i],rd(0x20),rd(0x30),rd(0x144));return false;
++            }
++            uint32_t status=rd(0x20),result=rd(0x98)&255,value=rd(0x9c);
++            printf("ACE UFS link: DME_GET attr=%04x rc=%02x value=%08x IS=%08x HCS=%08x elapsed-ticks=%llu REFCLK=%08x\n",attributes[i],result,value,status,rd(0x30),mach_absolute_time()-started,rd(0x144));
++            if(status!=0x400 || result || !inherited_ready() || (rd(0x144)&3)!=3) {
++                uint32_t words[5];snapshot("DME_GET fault",words);
++                printf("ACE UFS link: DME_GET rejected/faulted; no transfer queue writes\n");return false;
++            }
++            wr(0x20,0x400); /* W1C only this observed UIC completion. */
++        }
++        printf("ACE UFS link: local power/gear reads complete; no power-mode changes\n");
++        return true;
+     }
+     void run() {
+         printf("ACE UFS read: inherited UTRL=%08x:%08x TM=%08x:%08x DBR=%08x/%08x AHIT=%08x HCS=%08x\n",rd(0x54),rd(0x50),rd(0x74),rd(0x70),rd(0x58),rd(0x78),rd(0x18),rd(0x30));
+@@ -124,6 +155,7 @@
+             printf("ACE UFS read: cold error reasserted/state changed; no queue writes\n");return;
+         }
+         printf("ACE UFS read: cold handoff quiescent after three samples; proceeding to bounded NOP\n");
++        if(!inspect_link_power()) return;
+         dma=0;
+         if(kmem_alloc_contig(kernel_map,&dma,ACE_UFS_ARENA,0x3fff,0,0,
+             (kma_flags_t)(KMA_DATA|KMA_ZERO|KMA_PERMANENT),VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
