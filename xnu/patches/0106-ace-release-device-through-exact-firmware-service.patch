@@ -1,0 +1,123 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -38,7 +38,7 @@
+ }
+ 
+ /* The single cold-boot owner never frees its DMA page, including on timeout.
+- * No other Ace service owns UFS; no SMC/crypto keys or write CDB.
++ * No other Ace service owns UFS; no crypto keys or write CDB.
+  * A source-backed one-time device reset release has separate strict gates. */
+ static volatile uint32_t ace_ufs_claimed;
+ struct AceUFSReadProbe {
+@@ -46,6 +46,8 @@
+     uint64_t pa;
+     bool peer_read_issued;
+     bool reset_attempted, cold_local_commands;
++    bool firmware_call_issued, reset_release_accepted;
++    uint32_t reset_view;
+     vm_offset_t reset_ao;
+     uint32_t rd(unsigned off) {return *(volatile const uint32_t *)(mmio+off);}
+     void wr(unsigned off,uint32_t value) {*(volatile uint32_t *)(mmio+off)=value;__builtin_arm_dsb(0xf);}
+@@ -237,7 +239,9 @@
+          */
+         printf("ACE UFS reset: AO90=%08x/%08x release-bit=%u/%u; read-only\n",r1,r2,r1&1,r2&1);
+         if(r1==0xffffffffu || r2==0xffffffffu || ((r1^r2)&1)) return false;
+-        if((!(r1&1) || !(r2&1)) && !(allow_asserted && r1==0 && r2==0)) {
++        if(firmware_call_issued && (!reset_release_accepted || reset_view>1 || r1!=reset_view || r2!=reset_view)) return false;
++        if((!(r1&1) || !(r2&1)) && !(allow_asserted && r1==0 && r2==0) &&
++           !(reset_release_accepted && firmware_call_issued && reset_view<=1 && r1==reset_view && r2==reset_view)) {
+             printf("ACE UFS reset: release not observed; cached link UP insufficient; no UIC or DMA\n");return false;
+         }
+         if((a1&0x11f) || (a2&0x11f) || (p1&1) || (p2&1) || (t1&0x80) || (t2&0x80) ||
+@@ -248,9 +252,49 @@
+         printf("ACE UFS clocks: sampled gates enabled; frequencies and PHY still unproven\n");
+         return true;
+     }
++    bool firmware_release_device() {
++        /* Hash-pinned shipping ATF descriptor: MTK_SIP_KERNEL_UFS_CONTROL,
++         * c2000276 -> handler48229660, subop2/nonzero arg sets reset bit0.
++         * Actual0105 NS write read back zero; do not repeat that write or
++         * treat the NS view as an electrical pin measurement. Only release,
++         * no assertion pulse, power/crypto/reset-controller suboperation.
++         */
++        if(!reset_attempted || firmware_call_issued || !reset_ao || rd(0x34) ||
++           rd(0x60) || rd(0x80) || rd(0x58) || rd(0x78) || rd(0x24) || rd(0x20) ||
++           rd(0x2240)!=0x00360000 || (rd(0x144)&3)!=3 ||
++           *(volatile const uint32_t *)(reset_ao+0x90)!=0 ||
++           (*(volatile const uint32_t *)reset_ao&0x11f)) return false;
++        firmware_call_issued=true;
++        register uint64_t x0 __asm__("x0")=0xc2000276ULL;
++        register uint64_t x1 __asm__("x1")=2;
++        register uint64_t x2 __asm__("x2")=1;
++        register uint64_t x3 __asm__("x3")=0;
++        register uint64_t x4 __asm__("x4")=0;
++        register uint64_t x5 __asm__("x5")=0;
++        register uint64_t x6 __asm__("x6")=0;
++        register uint64_t x7 __asm__("x7")=0;
++        __builtin_arm_dsb(0xf);
++        __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
++            "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7) : :
++            "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++        __builtin_arm_dsb(0xf);
++        printf("ACE UFS SIP reset: FID=c2000276 op=2 high=1 rc=%016llx NS-AO90=%08x; firmware ack is not pin/link proof\n",
++            x0,*(volatile const uint32_t *)(reset_ao+0x90));
++        if(x0) return false;
++        reset_release_accepted=true;
++        return true;
++    }
++    bool reset_view_ready() {
++        /* A zero NS view may be RAZ, not an asserted physical pin. It is
++         * admissible only AFTER the exact firmware release acknowledged rc0.
++         * Unknown values/changes still stop; actual link/peer/NOP are required.
++         */
++        return reset_release_accepted && firmware_call_issued && reset_ao &&
++            reset_view<=1 && *(volatile const uint32_t *)(reset_ao+0x90)==reset_view;
++    }
+     bool local_init_ready() {
+         if(!cold_local_commands) return inherited_ready();
+-        return reset_attempted && reset_ao && *(volatile const uint32_t *)(reset_ao+0x90)==1 &&
++        return reset_attempted && reset_view_ready() &&
+             !(*(volatile const uint32_t *)reset_ao&0x11f) &&
+             rd(0x2240)==0x00360000 && (rd(0x34)&1)==1 && (rd(0x30)&8)==8 &&
+             !rd(0x24) && !rd(0x58) && !rd(0x78) && !rd(0x18) &&
+@@ -259,8 +303,8 @@
+     bool recover_asserted_device_once() {
+         /* Actual0104 sampled AO90=0 while the host retained old UP/gears.
+          * Shipped LK clears bit0 before final handoff; ATF/source identify
+-         * active-low device reset. No new assertion pulse is generated.
+-         * Stop HBA before release, wait >=10us low and 10ms after release,
++         * active-low device reset. A low NS view alone does not prove a low physical pin; no assertion pulse.
++         * Stop HBA before release, wait >=10us before SIP and 10ms after ack,
+          * then one HCE enable and one local link startup. No blind retry.
+          */
+         if(reset_attempted || peer_read_issued || !inspect_platform_clocks(true) ||
+@@ -282,14 +326,14 @@
+         }
+         IODelay(10);
+         if(*(volatile const uint32_t *)(ao+0x90)!=before || (*(volatile const uint32_t *)ao&0x11f) || (rd(0x144)&3)!=3) return false;
+-        reset_ao=ml_io_map_with_prot(0x112b8000,0x1000,VM_PROT_READ|VM_PROT_WRITE);
+-        if(!reset_ao || *(volatile const uint32_t *)(reset_ao+0x90)!=before) return false;
+-        *(volatile uint32_t *)(reset_ao+0x90)=before|1;__builtin_arm_dsb(0xf);
++        reset_ao=ao; /* Read-only mapping; reset release goes through exact SIP. */
++        if(!firmware_release_device()) return false;
+         uint32_t after=*(volatile const uint32_t *)(reset_ao+0x90);
+-        printf("ACE UFS reset-init: HBA stopped AO90=%08x->%08x; one release write\n",before,after);
+-        if(after!=(before|1)) return false;
++        printf("ACE UFS SIP reset: HBA stopped AO90 NS-view=%08x->%08x; one accepted release command\n",before,after);
++        if(after>1) return false;
++        reset_view=after;
+         IODelay(10000);
+-        if(*(volatile const uint32_t *)(reset_ao+0x90)!=after || (rd(0x34)&1) ||
++        if(!reset_view_ready() || (rd(0x34)&1) ||
+            rd(0x58) || rd(0x78) || rd(0x24) || (rd(0x144)&3)!=3 || rd(0x140)!=0x82) return false;
+         wr(0x34,1);IODelay(600);
+         cold_local_commands=true;
+@@ -313,7 +357,7 @@
+         IODelay(1000);uint32_t s3=snapshot("reset-link sample3",third);
+         if(!ace_ufs_cold_final_ready(s3,third) || !inherited_ready() ||
+            !inspect_platform_clocks() || inspect_vendor_link("after-device-release-startup")!=2) return false;
+-        printf("ACE UFS reset-init: released device and one link startup verified; peer and DMA still required\n");
++        printf("ACE UFS SIP reset: firmware release ack and one link startup verified; peer and DMA still required\n");
+         return true;
+     }
+     bool adopt_active_unipro() {
