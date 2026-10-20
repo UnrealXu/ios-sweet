@@ -1,0 +1,140 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -38,12 +38,15 @@
+ }
+ 
+ /* The single cold-boot owner never frees its DMA page, including on timeout.
+- * No other Ace service owns UFS, no SMC/reset/crypto keys, no write CDB. */
++ * No other Ace service owns UFS; no SMC/crypto keys or write CDB.
++ * A source-backed one-time device reset release has separate strict gates. */
+ static volatile uint32_t ace_ufs_claimed;
+ struct AceUFSReadProbe {
+     vm_offset_t mmio, dma;
+     uint64_t pa;
+     bool peer_read_issued;
++    bool reset_attempted, cold_local_commands;
++    vm_offset_t reset_ao;
+     uint32_t rd(unsigned off) {return *(volatile const uint32_t *)(mmio+off);}
+     void wr(unsigned off,uint32_t value) {*(volatile uint32_t *)(mmio+off)=value;__builtin_arm_dsb(0xf);}
+     bool wait(unsigned off,uint32_t mask,uint32_t value) {
+@@ -156,7 +159,7 @@
+         bool get=op==1 && (attr==0xd0a6 || attr==0xd0a1 || attr==0xd0a8);
+         bool set=op==2 && (attr==0xd0a6 || attr==0xd0a1 || ((attr==0xd0a8 || attr==0x155e) && value==0));
+         bool startup=op==0x16 && attr==0 && value==0;
+-        if(!(get || set || startup) || (get && value) || !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) {
++        if(!(get || set || startup) || (get && value) || !local_init_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) {
+             printf("ACE UFS init: UIC guard refused op=%x attr=%04x; no command\n",op,attr);return false;
+         }
+         wr(0x94,attr<<16);wr(0x98,0);wr(0x9c,value);
+@@ -168,7 +171,7 @@
+         answer=rd(0x9c);
+         printf("ACE UFS init: UIC op=%x attr=%04x sent=%08x rc=%02x value=%08x IS=%08x HCS=%08x ticks=%llu\n",op,attr,value,result,answer,status,rd(0x30),mach_absolute_time()-started);
+         uint32_t allowed=startup?0x504:0x400;
+-        if(result || (status&~allowed) || !(status&0x400) || !inherited_ready() || (rd(0x144)&3)!=3) {
++        if(result || (status&~allowed) || !(status&0x400) || !local_init_ready() || (rd(0x144)&3)!=3) {
+             uint32_t words[5];snapshot("init UIC fault",words);
+             printf("ACE UFS init: UIC failed; no retry or transfer queue writes\n");return false;
+         }
+@@ -206,7 +209,7 @@
+            !inherited_ready() || (rd(0x144)&3)!=3) return -1;
+         return second>>28;
+     }
+-    bool inspect_platform_clocks() {
++    bool inspect_platform_clocks(bool allow_asserted=false) {
+         /* Actual Ace FDT syscons; pinned mt6895-peri gates have set/clr at
+          * +4/+8, status at +0 (1=gated). Read status only, never gate/reset.
+          * Top CFG0 +0x10 holds HAXI select; CFG14 +0xf0 UFS select/gate.
+@@ -233,7 +236,8 @@
+          * change reset or infer that the device has acknowledged release.
+          */
+         printf("ACE UFS reset: AO90=%08x/%08x release-bit=%u/%u; read-only\n",r1,r2,r1&1,r2&1);
+-        if(!(r1&1) || !(r2&1)) {
++        if(r1==0xffffffffu || r2==0xffffffffu || ((r1^r2)&1)) return false;
++        if((!(r1&1) || !(r2&1)) && !(allow_asserted && r1==0 && r2==0)) {
+             printf("ACE UFS reset: release not observed; cached link UP insufficient; no UIC or DMA\n");return false;
+         }
+         if((a1&0x11f) || (a2&0x11f) || (p1&1) || (p2&1) || (t1&0x80) || (t2&0x80) ||
+@@ -242,6 +246,74 @@
+             printf("ACE UFS clocks: gated/unstable inherited clocks; no clock writes or peer command\n");return false;
+         }
+         printf("ACE UFS clocks: sampled gates enabled; frequencies and PHY still unproven\n");
++        return true;
++    }
++    bool local_init_ready() {
++        if(!cold_local_commands) return inherited_ready();
++        return reset_attempted && reset_ao && *(volatile const uint32_t *)(reset_ao+0x90)==1 &&
++            !(*(volatile const uint32_t *)reset_ao&0x11f) &&
++            rd(0x2240)==0x00360000 && (rd(0x34)&1)==1 && (rd(0x30)&8)==8 &&
++            !rd(0x24) && !rd(0x58) && !rd(0x78) && !rd(0x18) &&
++            !rd(0x60) && !rd(0x80) && (rd(0x144)&3)==3;
++    }
++    bool recover_asserted_device_once() {
++        /* Actual0104 sampled AO90=0 while the host retained old UP/gears.
++         * Shipped LK clears bit0 before final handoff; ATF/source identify
++         * active-low device reset. No new assertion pulse is generated.
++         * Stop HBA before release, wait >=10us low and 10ms after release,
++         * then one HCE enable and one local link startup. No blind retry.
++         */
++        if(reset_attempted || peer_read_issued || !inspect_platform_clocks(true) ||
++           !inherited_ready() || rd(0x34)!=1 || rd(0x60)>1 || rd(0x80)>1 || rd(0x24) || rd(0x20)) return false;
++        vm_offset_t ao=ml_io_map_with_prot(0x112b8000,0x1000,VM_PROT_READ);
++        if(!ao) return false;
++        uint32_t before=*(volatile const uint32_t *)(ao+0x90);
++        if(before==0xffffffffu) return false;
++        if(before&1) return inspect_platform_clocks();
++        if(before!=0 || rd(0x140)!=0x82 || inspect_vendor_link("before-device-release")!=2) return false;
++        uint32_t words[5];uint32_t status=snapshot("before-device-release",words);
++        if(!ace_ufs_cold_final_ready(status,words) || !inherited_ready() || rd(0x24)) return false;
++        reset_attempted=true;
++        wr(0x60,0);wr(0x80,0);
++        if(!wait(0x60,1,0) || !wait(0x80,1,0) || rd(0x58) || rd(0x78)) return false;
++        wr(0x34,0);
++        if(!wait(0x34,1,0) || rd(0x58) || rd(0x78)) {
++            printf("ACE UFS reset-init: HBA stop unverified; no device release\n");return false;
++        }
++        IODelay(10);
++        if(*(volatile const uint32_t *)(ao+0x90)!=before || (*(volatile const uint32_t *)ao&0x11f) || (rd(0x144)&3)!=3) return false;
++        reset_ao=ml_io_map_with_prot(0x112b8000,0x1000,VM_PROT_READ|VM_PROT_WRITE);
++        if(!reset_ao || *(volatile const uint32_t *)(reset_ao+0x90)!=before) return false;
++        *(volatile uint32_t *)(reset_ao+0x90)=before|1;__builtin_arm_dsb(0xf);
++        uint32_t after=*(volatile const uint32_t *)(reset_ao+0x90);
++        printf("ACE UFS reset-init: HBA stopped AO90=%08x->%08x; one release write\n",before,after);
++        if(after!=(before|1)) return false;
++        IODelay(10000);
++        if(*(volatile const uint32_t *)(reset_ao+0x90)!=after || (rd(0x34)&1) ||
++           rd(0x58) || rd(0x78) || rd(0x24) || (rd(0x144)&3)!=3 || rd(0x140)!=0x82) return false;
++        wr(0x34,1);IODelay(600);
++        cold_local_commands=true;
++        if(!wait(0x34,1,1) || !wait(0x30,8,8) || !local_init_ready()) {
++            printf("ACE UFS reset-init: local HCE/UIC not ready HCE=%08x HCS=%08x IS=%08x; stop\n",rd(0x34),rd(0x30),rd(0x20));return false;
++        }
++        status=snapshot("device-release HCE settled",words);
++        if(!ace_ufs_cold_final_ready(status,words)) return false;
++        uint32_t value=0,ignored=0;
++        if(!init_uic(2,0xd0a8,0,ignored) || !init_uic(2,0x155e,0,ignored) ||
++           !init_uic(1,0xd0a6,0,value) || value==0xffffffffu ||
++           !init_uic(2,0xd0a6,value&~0x40u,ignored) || !init_uic(0x16,0,0,ignored)) {
++            printf("ACE UFS reset-init: one local startup failed; no retry/peer/DMA\n");return false;
++        }
++        cold_local_commands=false;
++        uint32_t first[5],second[5],third[5];
++        uint32_t s1=snapshot("reset-link sample1",first);IODelay(1000);
++        uint32_t s2=snapshot("reset-link sample2",second);
++        if(!ace_ufs_cold_can_ack(s1,first,s2,second) || !inherited_ready()) return false;
++        if(s2&4) wr(0x20,4);
++        IODelay(1000);uint32_t s3=snapshot("reset-link sample3",third);
++        if(!ace_ufs_cold_final_ready(s3,third) || !inherited_ready() ||
++           !inspect_platform_clocks() || inspect_vendor_link("after-device-release-startup")!=2) return false;
++        printf("ACE UFS reset-init: released device and one link startup verified; peer and DMA still required\n");
+         return true;
+     }
+     bool adopt_active_unipro() {
+@@ -373,7 +445,7 @@
+             printf("ACE UFS read: cold error reasserted/state changed; no queue writes\n");return;
+         }
+         printf("ACE UFS read: cold handoff quiescent after three samples; proceeding to bounded NOP\n");
+-        if(!inspect_link_power() || !adopt_vendor_control() || !initialize_link_once()) return;
++        if(!inspect_link_power() || !adopt_vendor_control() || !recover_asserted_device_once() || !initialize_link_once()) return;
+         dma=0;
+         if(kmem_alloc_contig(kernel_map,&dma,ACE_UFS_ARENA,0x3fff,0,0,
+             (kma_flags_t)(KMA_DATA|KMA_ZERO|KMA_PERMANENT),VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
