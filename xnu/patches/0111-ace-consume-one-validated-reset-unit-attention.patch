@@ -1,0 +1,108 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -14,6 +14,7 @@
+ #include <mach/mach_time.h>
+ #include "AceUFSReadProtocol.h"
+ #include "AceUFSDeviceInit.h"
++#include "AceUFSResetAttention.h"
+ #include "AceUFSUICPolicy.h"
+ #include "AceUFSBootHandoff.h"
+ #include "AceUFSColdHandoff.h"
+@@ -48,6 +49,7 @@
+     bool peer_read_issued;
+     bool nop_verified, device_init_attempted, init_set_issued;
+     unsigned init_reads_issued;
++    bool device_init_complete, lun2_readiness_attempted;
+     bool reset_attempted, cold_local_commands;
+     bool firmware_call_issued, reset_release_accepted;
+     uint32_t reset_view;
+@@ -95,7 +97,10 @@
+         }
+         uint32_t ocs=*(uint32_t *)(a+8)&255;uint8_t *r=a+ACE_UFS_RESPONSE;
+         uint32_t status=rd(0x20);
+-        bool invalid=ocs || (status&0x70884) || r[0]!=(query?0x36:op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || r[6] || r[1] || (len && ace_ufs_be32(r+12));
++        bool reset_attention=op==ACE_UFS_TUR && device_init_complete &&
++            ace_ufs_reset_attention_response(r,512,lun) && status==1 && inherited_ready() &&
++            request_crc==ace_ufs_crc32(a+ACE_UFS_UCD,32);
++        bool invalid=ocs || (status&0x70884) || r[0]!=(query?0x36:op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || (r[6] && !reset_attention) || r[1] || (len && ace_ufs_be32(r+12));
+         if(query) {
+             uint32_t flag=0xffffffffu;
+             if(ace_ufs_device_init_response(r,512,op==ACE_UFS_INIT_SET?6:5,&flag) ||
+@@ -115,10 +120,19 @@
+             snapshot("command fault sample2",error_words);
+             /* Read-clear observations only: no recovery/second submission. */
+         }
++        if(!query && (invalid || r[7]==2)) {
++            printf("ACE UFS read: response-prefix64=");
++            for(unsigned i=0;i<64;i++) printf("%02x",r[i]);printf("\n");
++        }
+         wr(0x20,status&1); /* W1C this completed transfer only. */
+         if(log_command || invalid) printf("ACE UFS read: complete op=%u OCS=%02x type=%02x flags=%02x lun=%02x tag=%02x response=%02x status=%02x residual=%u sense=%02x/%02x/%02x IS=%08x\n",op,ocs,r[0],r[1],r[2],r[3],r[6],r[7],ace_ufs_be32(r+12),r[36]&15,r[46],r[47],status);
+         if(invalid) return -5;
+-        return r[7]==0?0:r[7]==2?1:-6; /* CHECK CONDITION is not transport success. */
++        if(reset_attention) {
++            if(!device_init_ready()) return -6;
++            printf("ACE UFS readiness: validated LUN2 reset Unit Attention06/29/00; next TUR must be GOOD\n");
++            return 1; /* Notification, never command/data success. */
++        }
++        return r[7]==0?0:-6; /* Any other CHECK CONDITION stops. */
+     }
+     bool device_init_ready() {
+         return nop_verified && reset_attempted && reset_view_ready() && inherited_ready() &&
+@@ -142,13 +156,27 @@
+             uint32_t flag=ace_ufs_be32((const uint8_t *)(dma+ACE_UFS_RESPONSE+20));
+             if(flag==0) {
+                 printf("ACE UFS device-init: fDeviceInit cleared after%u reads; SCSI/LUN readiness still required\n",i+1);
+-                return true;
++                device_init_complete=true;return true;
+             }
+             if(flag!=1) return false;
+             IODelay(5000);
+         }
+         printf("ACE UFS device-init: bounded flag-clear wait expired; no SCSI or retry\n");
+         return false;
++    }
++    bool lun2_ready_once() {
++        if(lun2_readiness_attempted || !device_init_complete || !device_init_ready()) return false;
++        lun2_readiness_attempted=true;
++        int rc=command(ACE_UFS_TUR,2);
++        if(rc==1) {
++            if(!device_init_ready()) return false;
++            rc=command(ACE_UFS_TUR,2); /* Exactly one validated reset UA only. */
++        }
++        if(rc || !device_init_ready()) {
++            printf("ACE UFS readiness: LUN2 TUR not GOOD; no capacity/read or further retry\n");return false;
++        }
++        printf("ACE UFS readiness: LUN2 TUR GOOD after device initialization; capacity/read still required\n");
++        return true;
+     }
+     uint32_t snapshot(const char *stage,uint32_t words[5]) {
+         for(unsigned i=0;i<5;i++) words[i]=rd(0x38+4*i);
+@@ -596,9 +624,7 @@
+         printf("ACE UFS read: genuine NOP response verified; high-address descriptor DMA complete\n");
+         nop_verified=true;
+         if(!complete_device_init_once()) return;
+-        int rc=command(ACE_UFS_TUR,2);
+-        if(rc==1) rc=command(ACE_UFS_TUR,2); /* Consume one inherited unit attention. */
+-        if(rc) return;
++        if(!lun2_ready_once()) return;
+         if(command(ACE_UFS_CAPACITY,2)) return;
+         uint8_t *b=(uint8_t *)(dma+ACE_UFS_DATA);uint64_t lastBlock=ace_ufs_be64(b);uint32_t block=ace_ufs_be32(b+8);
+         printf("ACE UFS read: LUN2 last-lba=0x%llx block-bytes=%u capacity-response-crc=%08x\n",lastBlock,block,ace_ufs_crc32(b,32));
+--- /dev/null
++++ b/iokit/Kernel/arm/AceUFSResetAttention.h
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: MIT
++ * Narrow readiness handling for the actual post-reset LUN2 Unit Attention.
++ * Requires the read-probe header first. This is not a general SCSI retry rule.
++ */
++#ifndef ACE_UFS_RESET_ATTENTION_H
++#define ACE_UFS_RESET_ATTENTION_H
++static inline int ace_ufs_reset_attention_response(const uint8_t *r,size_t bytes,unsigned lun) {
++    if(!r || bytes!=512 || lun!=2 || r[0]!=0x21 || r[1] || r[2]!=lun || r[3] ||
++       r[4] || r[5] || r[6]>1 || r[7]!=2 || r[8] || r[9] || r[10] || r[11]!=20 || ace_ufs_be32(r+12) ||
++       r[32] || r[33]!=18 || r[34]!=0x70 || r[36]!=6 || r[41]!=10 ||
++       r[46]!=0x29 || r[47]) return 0;
++    return 1; /* Fixed18-byte sense, current reset UA06/29/00 only. */
++}
++#endif
