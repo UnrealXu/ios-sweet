@@ -1,0 +1,79 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -44,6 +44,7 @@
+     vm_offset_t mmio, dma;
+     uint64_t pa;
+     bool peer_read_issued;
++    bool peer_mode_attempted;
+     uint32_t rd(unsigned off) {return *(volatile const uint32_t *)(mmio+off);}
+     void wr(unsigned off,uint32_t value) {*(volatile uint32_t *)(mmio+off)=value;__builtin_arm_dsb(0xf);}
+     bool wait(unsigned off,uint32_t mask,uint32_t value) {
+@@ -206,6 +207,59 @@
+            !inherited_ready() || (rd(0x144)&3)!=3) return -1;
+         return second>>28;
+     }
++    bool read_peer_mode_state(const char *stage,uint32_t values[3]) {
++        const unsigned attributes[3]={0x1571,0x1568,0x1583};
++        for(unsigned i=0;i<3;i++) {
++            if(!inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) return false;
++            wr(0x94,attributes[i]<<16);wr(0x98,0);wr(0x9c,0);wr(0x90,1);
++            bool complete=wait(0x20,0x400,0x400);
++            uint32_t status=rd(0x20),result=rd(0x98)&255;
++            values[i]=rd(0x9c);
++            printf("ACE UFS peer-auto: %s attr=%04x complete=%u rc=%02x value=%08x IS=%08x HCS=%08x\n",
++                stage,attributes[i],(unsigned)complete,result,values[i],status,rd(0x30));
++            if(!complete || result || status!=0x400 || !inherited_ready() || (rd(0x144)&3)!=3) {
++                uint32_t words[5];snapshot("peer-auto local read fault",words);return false;
++            }
++            wr(0x20,0x400);
++        }
++        return true;
++    }
++    bool prepare_peer_auto_mode_once() {
++        /* Restricted experiment derived from ufshcd_dme_get_attr's AUTO-mode
++         * workaround. Its applicability to this MTK handoff is NOT proven.
++         * Change only PA_PWRMODE, retaining the already negotiated gears and
++         * lanes. No re-negotiation of gear/lanes, peer SET, reset or SMC.
++         */
++        if(peer_mode_attempted || peer_read_issued || rd(0x2240)!=0x00360000 ||
++           !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3 ||
++           inspect_vendor_link("before-peer-auto")!=2 || !inherited_ready() ||
++           rd(0x20)!=0 || (rd(0x144)&3)!=3) return false;
++        peer_mode_attempted=true;
++        uint32_t before[3]={},after[3]={};
++        if(!read_peer_mode_state("before",before) || before[0]!=0x11 || before[1]!=4 || before[2]!=4 ||
++           !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) {
++            printf("ACE UFS peer-auto: unsupported inherited mode/gears; no power-mode SET\n");return false;
++        }
++        wr(0x94,0x15710000);wr(0x98,0);wr(0x9c,0x44);
++        uint64_t started=mach_absolute_time();wr(0x90,2); /* PA_PWRMODE FASTAUTO/FASTAUTO */
++        bool complete=wait(0x20,0x410,0x410); /* UCCS alone is insufficient. */
++        uint32_t status=rd(0x20),result=rd(0x98)&255,hcs=rd(0x30);
++        printf("ACE UFS peer-auto: SET 11->44 complete=%u rc=%02x IS=%08x HCS=%08x UPMCRS=%u ticks=%llu REFCLK=%08x\n",
++            (unsigned)complete,result,status,hcs,(hcs>>8)&7,mach_absolute_time()-started,rd(0x144));
++        if(!complete || result || status!=0x410 || ((hcs>>8)&7)!=1 ||
++           !inherited_ready() || (rd(0x144)&3)!=3) {
++            uint32_t words[5];snapshot("peer-auto transition fault",words);
++            inspect_vendor_link("peer-auto-failed");
++            printf("ACE UFS peer-auto: transition unverified; no retry, peer command or DMA\n");return false;
++        }
++        wr(0x20,0x410); /* Only verified command and power-mode completions. */
++        if(!read_peer_mode_state("after",after) || after[0]!=0x44 || after[1]!=before[1] || after[2]!=before[2] ||
++           inspect_vendor_link("after-peer-auto")!=2) return false;
++        uint32_t words[5];uint32_t quiet=snapshot("peer-auto settled",words);
++        if(!ace_ufs_cold_final_ready(quiet,words) || !inherited_ready() || (rd(0x144)&3)!=3) return false;
++        printf("ACE UFS peer-auto: FASTAUTO mode and unchanged gears verified; peer response still required\n");
++        return true;
++    }
+     bool inspect_peer_transport_once() {
+         /* One read-only peer transaction, before taking firmware DMA queues.
+          * PA_CONNECTEDTXDATALANES is read by ufshcd_disable_tx_lcc(peer=true).
+@@ -262,7 +316,7 @@
+         }
+         if(link==2) {
+             printf("ACE UFS init: inherited stable UP/idle; skip pre-link and LINK_STARTUP\n");
+-            if(!inspect_peer_transport_once()) return false;
++            if(!prepare_peer_auto_mode_once() || !inspect_peer_transport_once()) return false;
+             return finish_link_configuration();
+         }
+         printf("ACE UFS init: begin MTK local pre-link and one LINK_STARTUP; no reset/SMC\n");
