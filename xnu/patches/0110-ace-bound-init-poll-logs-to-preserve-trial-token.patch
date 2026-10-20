@@ -1,0 +1,46 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -47,6 +47,7 @@
+     uint64_t pa;
+     bool peer_read_issued;
+     bool nop_verified, device_init_attempted, init_set_issued;
++    unsigned init_reads_issued;
+     bool reset_attempted, cold_local_commands;
+     bool firmware_call_issued, reset_release_accepted;
+     uint32_t reset_view;
+@@ -71,9 +72,16 @@
+         int len=query?((lun || lba || block)?-1:ace_ufs_device_init_request(a,ACE_UFS_ARENA,pa,op==ACE_UFS_INIT_SET?6:5)):
+             ace_ufs_read_request(a,ACE_UFS_ARENA,pa,op,lun,lba,block);
+         if(len<0) return -2;
++        if(op==ACE_UFS_INIT_READ) init_reads_issued++;
++        /* Preserve the current-token entry in the64KiB pmsg ring even if all
++         *300 poll reads complete with flag1. Every response remains checked;
++         * log first3/powers-of-two and every fault, plus final read count.
++         */
++        bool log_command=op!=ACE_UFS_INIT_READ || init_reads_issued<=3 ||
++            !(init_reads_issued&(init_reads_issued-1));
+         uint32_t request_crc=ace_ufs_crc32(a+ACE_UFS_UCD,32);
+         FlushPoC_DcacheRegion(dma,ACE_UFS_ARENA);__builtin_arm_dsb(0xf);
+-        printf("ACE UFS read: submit op=%u lun=%u lba=%u bytes=%d\n",op,lun,lba,len);
++        if(log_command) printf("ACE UFS read: submit op=%u lun=%u lba=%u bytes=%d\n",op,lun,lba,len);
+         uint64_t submitted=mach_absolute_time();
+         if(op==ACE_UFS_INIT_SET) init_set_issued=true; /* Consumed before submission. */
+         wr(0x58,1);
+@@ -92,7 +100,7 @@
+             uint32_t flag=0xffffffffu;
+             if(ace_ufs_device_init_response(r,512,op==ACE_UFS_INIT_SET?6:5,&flag) ||
+                request_crc!=ace_ufs_crc32(a+ACE_UFS_UCD,32) || status!=1 || !inherited_ready()) invalid=true;
+-            printf("ACE UFS device-init: query=%u type=%02x response=%02x status=%02x opcode=%02x idn=%02x index=%02x selector=%02x flag=%08x valid=%u\n",
++            if(log_command || invalid) printf("ACE UFS device-init: query=%u type=%02x response=%02x status=%02x opcode=%02x idn=%02x index=%02x selector=%02x flag=%08x valid=%u\n",
+                 op,r[0],r[6],r[7],r[12],r[13],r[14],r[15],flag,(unsigned)!invalid);
+         }
+         if(invalid) {
+@@ -108,7 +116,7 @@
+             /* Read-clear observations only: no recovery/second submission. */
+         }
+         wr(0x20,status&1); /* W1C this completed transfer only. */
+-        printf("ACE UFS read: complete op=%u OCS=%02x type=%02x flags=%02x lun=%02x tag=%02x response=%02x status=%02x residual=%u sense=%02x/%02x/%02x IS=%08x\n",op,ocs,r[0],r[1],r[2],r[3],r[6],r[7],ace_ufs_be32(r+12),r[36]&15,r[46],r[47],status);
++        if(log_command || invalid) printf("ACE UFS read: complete op=%u OCS=%02x type=%02x flags=%02x lun=%02x tag=%02x response=%02x status=%02x residual=%u sense=%02x/%02x/%02x IS=%08x\n",op,ocs,r[0],r[1],r[2],r[3],r[6],r[7],ace_ufs_be32(r+12),r[36]&15,r[46],r[47],status);
+         if(invalid) return -5;
+         return r[7]==0?0:r[7]==2?1:-6; /* CHECK CONDITION is not transport success. */
+     }
