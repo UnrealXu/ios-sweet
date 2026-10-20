@@ -1,0 +1,44 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -1,4 +1,4 @@
+-/* Ace controller discovery only: no DMA, IRQ enable, reset or media service. */
++/* Ace discovery and opt-in bounded read probe; no media/storage writes. */
+ #include <pexpert/arm64/board_config.h>
+ #if defined(ARM64_BOARD_CONFIG_ACE)
+ #include <IOKit/IOService.h>
+@@ -59,8 +59,10 @@
+         if(rd(0x58) || rd(0x78) || rd(0x50)!=(uint32_t)pa || rd(0x54)!=(uint32_t)(pa>>32) || !(rd(0x60)&1)) return -1;
+         int len=ace_ufs_read_request(a,ACE_UFS_ARENA,pa,op,lun,lba,block);
+         if(len<0) return -2;
++        uint32_t request_crc=ace_ufs_crc32(a+ACE_UFS_UCD,32);
+         FlushPoC_DcacheRegion(dma,ACE_UFS_ARENA);__builtin_arm_dsb(0xf);
+         printf("ACE UFS read: submit op=%u lun=%u lba=%u bytes=%d\n",op,lun,lba,len);
++        uint64_t submitted=mach_absolute_time();
+         wr(0x58,1);
+         if(!wait(0x58,1,0)) {
+             printf("ACE UFS read: TIMEOUT op=%u DBR=%08x IS=%08x HCS=%08x UIC=%08x/%08x/%08x/%08x/%08x; DMA page retained\n",op,rd(0x58),rd(0x20),rd(0x30),rd(0x38),rd(0x3c),rd(0x40),rd(0x44),rd(0x48));
+@@ -71,9 +73,22 @@
+             printf("ACE UFS read: DMA guard changed at%u; stop\n",i);return -4;
+         }
+         uint32_t ocs=*(uint32_t *)(a+8)&255;uint8_t *r=a+ACE_UFS_RESPONSE;
+-        uint32_t status=rd(0x20);wr(0x20,status&1); /* W1C this completed transfer only. */
++        uint32_t status=rd(0x20);
++        bool invalid=ocs || (status&0x70884) || r[0]!=(op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || r[6] || r[1] || (len && ace_ufs_be32(r+12));
++        if(invalid) {
++            unsigned poison=0;
++            for(unsigned i=0;i<512;i++) if(r[i]==0xa5) poison++;
++            printf("ACE UFS read: fault op=%u elapsed-ticks=%llu HCS=%08x HCE=%08x UTRL=%08x:%08x DBR=%08x RSR=%08x AHIT=%08x\n",op,mach_absolute_time()-submitted,rd(0x30),rd(0x34),rd(0x54),rd(0x50),rd(0x58),rd(0x60),rd(0x18));
++            printf("ACE UFS read: fault descriptor0=%08x descriptor2=%08x UCD=%08x:%08x request-crc=%08x/%08x response-poison=%u/512 UICCMD=%08x ARG=%08x/%08x/%08x\n",*(uint32_t *)a,*(uint32_t *)(a+8),*(uint32_t *)(a+20),*(uint32_t *)(a+16),request_crc,ace_ufs_crc32(a+ACE_UFS_UCD,32),poison,rd(0x90),rd(0x94),rd(0x98),rd(0x9c));
++            uint32_t error_words[5];
++            snapshot("command fault sample1",error_words);
++            IODelay(1000);
++            snapshot("command fault sample2",error_words);
++            /* Read-clear observations only: no recovery/second submission. */
++        }
++        wr(0x20,status&1); /* W1C this completed transfer only. */
+         printf("ACE UFS read: complete op=%u OCS=%02x type=%02x flags=%02x lun=%02x tag=%02x response=%02x status=%02x residual=%u sense=%02x/%02x/%02x IS=%08x\n",op,ocs,r[0],r[1],r[2],r[3],r[6],r[7],ace_ufs_be32(r+12),r[36]&15,r[46],r[47],status);
+-        if(ocs || (status&0x70884) || r[0]!=(op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || r[6] || r[1] || (len && ace_ufs_be32(r+12))) return -5;
++        if(invalid) return -5;
+         return r[7]==0?0:r[7]==2?1:-6; /* CHECK CONDITION is not transport success. */
+     }
+     uint32_t snapshot(const char *stage,uint32_t words[5]) {
