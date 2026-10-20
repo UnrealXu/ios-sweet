@@ -8,3 +8,7 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# CI dependency/compiler caches and generated kernel artifacts (never sources)
+.ci-cache/
+kernel-out/
+build-metrics.json
