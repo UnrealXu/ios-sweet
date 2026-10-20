@@ -1,0 +1,217 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -6,6 +6,12 @@
+ #include <libkern/c++/OSData.h>
+ #include <machine/machine_routines.h>
+ #include <mach/vm_prot.h>
++#include <vm/vm_kern.h>
++#include <vm/pmap.h>
++#include <arm/caches_internal.h>
++#include <mach/mach_time.h>
++#include "AceUFSReadProtocol.h"
++extern "C" ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ 
+ /* Built-in board driver: declaration otherwise gated to MACH/PEXPERT private. */
+ extern "C" vm_offset_t ml_io_map_with_prot(vm_offset_t, vm_size_t, vm_prot_t);
+@@ -26,19 +32,111 @@
+     return value == expected;
+ }
+ 
++/* The single cold-boot owner never frees its DMA page, including on timeout.
++ * No other Ace service owns UFS, no SMC/reset/crypto keys, no write CDB. */
++static volatile uint32_t ace_ufs_claimed;
++struct AceUFSReadProbe {
++    vm_offset_t mmio, dma;
++    uint64_t pa;
++    uint32_t rd(unsigned off) {return *(volatile const uint32_t *)(mmio+off);}
++    void wr(unsigned off,uint32_t value) {*(volatile uint32_t *)(mmio+off)=value;__builtin_arm_dsb(0xf);}
++    bool wait(unsigned off,uint32_t mask,uint32_t value) {
++        uint64_t start=mach_absolute_time(),span;nanoseconds_to_absolutetime(500000000,&span);
++        for(unsigned i=0;i<500000;i++) {
++            if((rd(off)&mask)==value) return true;
++            if(mach_absolute_time()-start>=span) return false;
++            IODelay(1);
++        }
++        return false;
++    }
++    int command(unsigned op,unsigned lun=0,unsigned lba=0,unsigned block=0) {
++        uint8_t *a=(uint8_t *)dma;
++        if(rd(0x58) || rd(0x78) || rd(0x50)!=(uint32_t)pa || rd(0x54)!=(uint32_t)(pa>>32) || !(rd(0x60)&1)) return -1;
++        int len=ace_ufs_read_request(a,ACE_UFS_ARENA,pa,op,lun,lba,block);
++        if(len<0) return -2;
++        FlushPoC_DcacheRegion(dma,ACE_UFS_ARENA);__builtin_arm_dsb(0xf);
++        printf("ACE UFS read: submit op=%u lun=%u lba=%u bytes=%d\n",op,lun,lba,len);
++        wr(0x58,1);
++        if(!wait(0x58,1,0)) {
++            printf("ACE UFS read: TIMEOUT op=%u DBR=%08x IS=%08x HCS=%08x UIC=%08x/%08x/%08x/%08x/%08x; DMA page retained\n",op,rd(0x58),rd(0x20),rd(0x30),rd(0x38),rd(0x3c),rd(0x40),rd(0x44),rd(0x48));
++            return -3; /* Never reuse/free a possibly active DMA page. */
++        }
++        __builtin_arm_dsb(0xf);FlushPoC_DcacheRegion(dma,ACE_UFS_ARENA);
++        for(unsigned i=ACE_UFS_GUARD;i<ACE_UFS_ARENA;i++) if(a[i]!=0x5a) {
++            printf("ACE UFS read: DMA guard changed at%u; stop\n",i);return -4;
++        }
++        uint32_t ocs=*(uint32_t *)(a+8)&255;uint8_t *r=a+ACE_UFS_RESPONSE;
++        uint32_t status=rd(0x20);wr(0x20,status&1); /* W1C this completed transfer only. */
++        printf("ACE UFS read: complete op=%u OCS=%02x type=%02x flags=%02x lun=%02x tag=%02x response=%02x status=%02x residual=%u sense=%02x/%02x/%02x IS=%08x\n",op,ocs,r[0],r[1],r[2],r[3],r[6],r[7],ace_ufs_be32(r+12),r[34]&15,r[44],r[45],status);
++        if(ocs || (status&0x70084) || r[0]!=(op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || r[6] || r[1] || (len && ace_ufs_be32(r+12))) return -5;
++        return r[7]==0?0:r[7]==2?1:-6; /* CHECK CONDITION is not transport success. */
++    }
++    void run() {
++        printf("ACE UFS read: inherited UTRL=%08x:%08x TM=%08x:%08x DBR=%08x/%08x AHIT=%08x HCS=%08x\n",rd(0x54),rd(0x50),rd(0x74),rd(0x70),rd(0x58),rd(0x78),rd(0x18),rd(0x30));
++        if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1) || rd(0x08)!=0x200 ||
++           (rd(0x34)&1)!=1 || (rd(0x30)&15)!=15 || !(rd(0)&0x1000000) ||
++           (rd(0)&31)!=31 || rd(0x58) || rd(0x78) || rd(0x18) || (rd(0x20)&0x70084)) {
++            printf("ACE UFS read: inherited-state gate refused; no queue writes\n");return;
++        }
++        dma=0;
++        if(kmem_alloc_contig(kernel_map,&dma,ACE_UFS_ARENA,0x3fff,0,0,
++            (kma_flags_t)(KMA_DATA|KMA_ZERO|KMA_PERMANENT),VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
++            printf("ACE UFS read: DMA allocation failed\n");return;
++        }
++        ppnum_t first=pmap_find_phys(kernel_pmap,(addr64_t)dma),last=pmap_find_phys(kernel_pmap,(addr64_t)(dma+ACE_UFS_ARENA-1));
++        pa=(uint64_t)first<<PAGE_SHIFT;
++        if(!first || first!=last || (pa&0x3fff) || pa<0x140000000ULL || pa>0x200000000ULL-ACE_UFS_ARENA) {
++            printf("ACE UFS read: invalid/foreign DMA page pa=%llx last=%x\n",pa,last);return;
++        }
++        printf("ACE UFS read: dedicated permanent DMA page pa=0x%llx bytes=%u, direct-address hypothesis\n",pa,ACE_UFS_ARENA);
++        wr(0x24,0);wr(0x60,0);wr(0x80,0);
++        if(!wait(0x60,1,0) || !wait(0x80,1,0) || rd(0x58) || rd(0x78)) {
++            printf("ACE UFS read: queue stop failed; no doorbell\n");return;
++        }
++        wr(0x50,(uint32_t)pa);wr(0x54,(uint32_t)(pa>>32));wr(0x60,1);
++        if(rd(0x50)!=(uint32_t)pa || rd(0x54)!=(uint32_t)(pa>>32) || !wait(0x60,1,1) || !(rd(0x30)&2)) {
++            printf("ACE UFS read: queue adoption failed; no doorbell\n");return;
++        }
++        if(command(ACE_UFS_NOP)) return;
++        printf("ACE UFS read: genuine NOP response verified; high-address descriptor DMA complete\n");
++        int rc=command(ACE_UFS_TUR);
++        if(rc==1) rc=command(ACE_UFS_TUR); /* Consume one inherited unit attention. */
++        if(rc) return;
++        if(command(ACE_UFS_CAPACITY)) return;
++        uint8_t *b=(uint8_t *)(dma+ACE_UFS_DATA);uint64_t lastBlock=ace_ufs_be64(b);uint32_t block=ace_ufs_be32(b+8);
++        printf("ACE UFS read: LUN0 last-lba=0x%llx block-bytes=%u capacity-response-crc=%08x\n",lastBlock,block,ace_ufs_crc32(b,32));
++        if(lastBlock<1 || lastBlock==UINT64_MAX || (block!=4096 && block!=512)) return;
++        for(unsigned lba=0;lba<=1;lba++) {
++            if(command(ACE_UFS_BLOCK,0,lba,block)) return;
++            printf("ACE UFS read: LUN0 block%u CRC32=%08x first16=",lba,ace_ufs_crc32(b,block));
++            for(unsigned i=0;i<16;i++) printf("%02x",b[i]);printf(" MBR-signature=%02x%02x\n",b[510],b[511]);
++            if(lba==1 && !memcmp(b,"EFI PART",8)) {
++                uint32_t n=(uint32_t)b[12]|(uint32_t)b[13]<<8|(uint32_t)b[14]<<16|(uint32_t)b[15]<<24;
++                uint32_t stored=(uint32_t)b[16]|(uint32_t)b[17]<<8|(uint32_t)b[18]<<16|(uint32_t)b[19]<<24;
++                if(n>=92 && n<=block) {
++                    b[16]=b[17]=b[18]=b[19]=0;
++                    printf("ACE UFS read: GPT header size=%u crc-stored=%08x crc-calculated=%08x\n",n,stored,ace_ufs_crc32(b,n));
++                }
++            }
++        }
++        printf("ACE UFS read: bounded LUN0 blocks0/1 complete; no media published, no storage writes\n");
++    }
++};
++
+ bool AceUFSController::start(IOService *provider)
+ {
+     OSData *data = OSDynamicCast(OSData, provider->getProperty("reg"));
+     uint64_t reg[2] = {};
+-    if (!data || data->getLength() != sizeof(reg) ||
+-        !ace_ufs_u32(provider, "ace,read-only-probe", 1) ||
++    bool commandRead = ace_ufs_u32(provider, "ace,command-read-probe", 1);
++    bool readOnly = ace_ufs_u32(provider, "ace,read-only-probe", 1);
++    if (commandRead == readOnly || !data || data->getLength() != sizeof(reg) ||
+         !ace_ufs_u32(provider, "interrupt-intid", 169)) return false;
+     bcopy(data->getBytesNoCopy(), reg, sizeof(reg));
+     if (reg[0] != 0x112b0000 || reg[1] != 0x2300 || !IOService::start(provider)) return false;
+-    printf("ACE UFS: read-only map begin base=0x%llx size=0x%llx\n", reg[0], reg[1]);
+-    /* Permanent BSP mapping, read permission only. No unmappable-map API or
++    printf("ACE UFS: %s map begin base=0x%llx size=0x%llx\n", commandRead ? "command-read" : "read-only", reg[0], reg[1]);
++    /* Permanent BSP mapping: write permission requires the separate command profile. No unmappable-map API or
+      * unmap of this permanent mapping. Abort before any register access on failure. */
+-    vm_offset_t mapped = ml_io_map_with_prot((vm_offset_t)reg[0], (vm_size_t)reg[1], VM_PROT_READ);
++    vm_offset_t mapped = ml_io_map_with_prot((vm_offset_t)reg[0], (vm_size_t)reg[1], commandRead ? VM_PROT_READ|VM_PROT_WRITE : VM_PROT_READ);
+     if (!mapped) { printf("ACE UFS: read-only map failed\n"); return false; }
+     volatile const uint32_t *hci = (volatile const uint32_t *)mapped;
+     uint32_t cap = hci[0x00/4], ver = hci[0x08/4];
+@@ -51,7 +149,8 @@
+     if (cap == 0 || cap == 0xffffffff || ver == 0 || ver == 0xffffffff) {
+         printf("ACE UFS: invalid/unavailable controller registers\n"); return false;
+     }
+-    setProperty("ace,read-only-probe", true);
++    if (commandRead) {AceUFSReadProbe probe = {};probe.mmio = mapped;probe.run();}
++    setProperty(commandRead ? "ace,command-read-probe" : "ace,read-only-probe", true);
+     setProperty("ace,cap", cap, 32);
+     setProperty("ace,version", ver, 32);
+     registerService();
+--- /dev/null
++++ b/iokit/Kernel/arm/AceUFSReadProtocol.h
+@@ -0,0 +1,57 @@
++/* SPDX-License-Identifier: MIT
++ * Bounded UFSHCI2 read-probe wire format. No controller or disk writes.
++ * Copied byte-for-byte into the kernel patch; host tests exercise this code. */
++#ifndef ACE_UFS_READ_PROTOCOL_H
++#define ACE_UFS_READ_PROTOCOL_H
++#include <stdint.h>
++#include <stddef.h>
++#define ACE_UFS_ARENA 0x4000u
++#define ACE_UFS_UCD 0x1000u
++#define ACE_UFS_RESPONSE 0x1200u
++#define ACE_UFS_PRDT 0x1400u
++#define ACE_UFS_DATA 0x2000u
++#define ACE_UFS_GUARD 0x3c00u
++enum ace_ufs_read_op { ACE_UFS_NOP=0, ACE_UFS_TUR=1, ACE_UFS_CAPACITY=2, ACE_UFS_BLOCK=3 };
++static inline void ace_ufs_le32(uint8_t *p,uint32_t v) {
++    for(unsigned i=0;i<4;i++) p[i]=(uint8_t)(v>>(8*i));
++}
++static inline uint32_t ace_ufs_be32(const uint8_t *p) {
++    return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];
++}
++static inline uint64_t ace_ufs_be64(const uint8_t *p) {
++    return (uint64_t)ace_ufs_be32(p)<<32|ace_ufs_be32(p+4);
++}
++/* All refusal checks precede destination stores. Slot0 requires task tag0.
++ * Only NOP, TEST UNIT READY, READ CAPACITY(16), READ(10) LBA0/1 are possible. */
++static inline int ace_ufs_read_request(uint8_t *a,size_t bytes,uint64_t pa,
++    unsigned op,unsigned lun,unsigned lba,unsigned block_bytes) {
++    if(!a || bytes!=ACE_UFS_ARENA || !pa || (pa&0x3fff) ||
++       pa>=(1ULL<<40)-ACE_UFS_ARENA || op>ACE_UFS_BLOCK || lun>7 ||
++       (op==ACE_UFS_NOP && lun) || (op!=ACE_UFS_BLOCK && (lba || block_bytes)) ||
++       (op==ACE_UFS_BLOCK && (lba>1 || (block_bytes!=512 && block_bytes!=4096)))) return -1;
++    unsigned len=op==ACE_UFS_CAPACITY?32:op==ACE_UFS_BLOCK?block_bytes:0;
++    for(unsigned i=0;i<bytes;i++) a[i]=0;
++    for(unsigned i=ACE_UFS_GUARD;i<bytes;i++) a[i]=0x5a;
++    for(unsigned i=ACE_UFS_RESPONSE;i<ACE_UFS_RESPONSE+512;i++) a[i]=0xa5;
++    uint8_t *cmd=a+ACE_UFS_UCD;
++    cmd[0]=op==ACE_UFS_NOP?0:1;cmd[1]=len?0x40:0;cmd[2]=(uint8_t)lun;
++    cmd[12]=(uint8_t)(len>>24);cmd[13]=(uint8_t)(len>>16);cmd[14]=(uint8_t)(len>>8);cmd[15]=(uint8_t)len;
++    if(op==ACE_UFS_CAPACITY) {cmd[16]=0x9e;cmd[17]=0x10;cmd[29]=32;}
++    if(op==ACE_UFS_BLOCK) {cmd[16]=0x28;cmd[21]=(uint8_t)lba;cmd[24]=1;}
++    ace_ufs_le32(a,0x11000000|(len?0x04000000:0));ace_ufs_le32(a+8,15);
++    ace_ufs_le32(a+16,(uint32_t)(pa+ACE_UFS_UCD));ace_ufs_le32(a+20,(uint32_t)((pa+ACE_UFS_UCD)>>32));
++    ace_ufs_le32(a+24,(128u<<16)|128u);
++    if(len) {
++        ace_ufs_le32(a+28,(256u<<16)|1u);
++        ace_ufs_le32(a+ACE_UFS_PRDT,(uint32_t)(pa+ACE_UFS_DATA));
++        ace_ufs_le32(a+ACE_UFS_PRDT+4,(uint32_t)((pa+ACE_UFS_DATA)>>32));
++        ace_ufs_le32(a+ACE_UFS_PRDT+12,len-1);
++    }
++    return (int)len;
++}
++static inline uint32_t ace_ufs_crc32(const uint8_t *p,size_t n) {
++    uint32_t crc=0xffffffffu;
++    for(size_t i=0;i<n;i++) {crc^=p[i];for(unsigned j=0;j<8;j++) crc=(crc>>1)^(0xedb88320u& (0u-(crc&1)));}
++    return ~crc;
++}
++#endif
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -51,6 +51,12 @@
+     "     'IOClass'         = AceUFSController;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'ace,mt6895-ufs-hci-probe-v1';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++    "   {"
++    "     'IOClass'         = AceUFSController;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'ace,mt6895-ufs-read-v1';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+ #elif defined(ARM64_BOARD_CONFIG_SWEET)
