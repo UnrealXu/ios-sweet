@@ -1,0 +1,41 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -292,6 +292,28 @@
+         return reset_release_accepted && firmware_call_issued && reset_ao &&
+             reset_view==1 && *(volatile const uint32_t *)(reset_ao+0x90)==reset_view;
+     }
++    bool stopped_vendor_ready() {
++        return reset_attempted && reset_view_ready() && !peer_read_issued &&
++            !cold_local_commands && !(*(volatile const uint32_t *)reset_ao&0x11f) &&
++            rd(0x2240)==0x00360000 && rd(0x34)==0 && rd(0x30)==0 &&
++            !rd(0x60) && !rd(0x80) && !rd(0x58) && !rd(0x78) &&
++            !rd(0x24) && !rd(0x20) && !rd(0x18) && (rd(0x144)&3)==3;
++    }
++    bool restore_stopped_vendor_control() {
++        /* Actual0107: stopping HCE/reset changes XOUFS82 to2. Pinned shipping
++         * hce_enable_notify and family source set bit0x80 after reset, before
++         * enabling HCE. Restore only this observed value under stopped/quiet
++         * ownership and accepted SIP gates; no other vendor bit or reset.
++         */
++        if(!stopped_vendor_ready()) return false;
++        uint32_t before=rd(0x140);
++        if(before!=2 && before!=0x82) return false;
++        if(!stopped_vendor_ready() || rd(0x140)!=before) return false;
++        if(before==2) wr(0x140,0x82);
++        uint32_t after=rd(0x140);
++        printf("ACE UFS reset-vendor: stopped XOUFS=%08x->%08x; expected82 before HCE enable\n",before,after);
++        return after==0x82 && stopped_vendor_ready() && rd(0x140)==0x82;
++    }
+     bool local_init_ready() {
+         if(!cold_local_commands) return inherited_ready();
+         return reset_attempted && reset_view_ready() &&
+@@ -336,8 +358,7 @@
+         printf("ACE UFS SIP settle: NS-AO90=%08x expected=%08x ack=%u issued=%u HCE=%08x HCS=%08x IE=%08x DBR=%08x/%08x RSR=%08x/%08x AHIT=%08x REFCLK=%08x XOUFS=%08x IS=%08x\n",
+             *(volatile const uint32_t *)(reset_ao+0x90),reset_view,(unsigned)reset_release_accepted,(unsigned)firmware_call_issued,
+             rd(0x34),rd(0x30),rd(0x24),rd(0x58),rd(0x78),rd(0x60),rd(0x80),rd(0x18),rd(0x144),rd(0x140),rd(0x20));
+-        if(!reset_view_ready() || (rd(0x34)&1) ||
+-           rd(0x58) || rd(0x78) || rd(0x24) || (rd(0x144)&3)!=3 || rd(0x140)!=0x82) {
++        if(!restore_stopped_vendor_control() || !stopped_vendor_ready() || rd(0x140)!=0x82) {
+             printf("ACE UFS SIP settle: stopped-state gate failed; no HCE enable/UIC/DMA\n");return false;
+         }
+         printf("ACE UFS SIP settle: stopped-state gate passed; one HCE enable next\n");
