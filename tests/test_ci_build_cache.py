@@ -4,6 +4,7 @@ import importlib.util
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('cache', ROOT / 'tools/ci-build-cache.py')
@@ -71,6 +72,35 @@ class SourceCacheTests(unittest.TestCase):
         self.assertLess(names.index('Upload verified kernel immediately'),
                         names.index('Package build tree for local compiles'))
         self.assertIn('CCACHE_DISABLE=1', (ROOT / 'tools/ci-build-cache.py').read_text())
+
+    def test_cached_mode_preserves_paths_and_uses_strict_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            env = workspace / 'github-env'
+            with patch.dict(cache.os.environ, {'DXB_SHA': 'recipe', 'GITHUB_ENV': str(env)}), \
+                 patch.object(cache, 'command', return_value='recipe'), \
+                 patch.object(cache, 'reset_sources'), \
+                 patch.object(cache.shutil, 'which', return_value='/opt/homebrew/bin/ccache'), \
+                 patch.object(cache.subprocess, 'run') as run:
+                cache.prepare(workspace, 'cached')
+            self.assertIn('CCACHE_BASEDIR=\n', env.read_text())
+            self.assertIn('CCACHE_COMPILERCHECK=content\n', env.read_text())
+            self.assertEqual((workspace / '.ci-cache/ccache.conf').read_text(),
+                             'compiler_check = content\nsloppiness =\nmax_size = 1G\n')
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [['ccache', '--max-size', '1G'], ['ccache', '--zero-stats']])
+
+    def test_full_mode_disables_compiler_cache_and_does_not_restore_kdk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            env = workspace / 'github-env'
+            with patch.dict(cache.os.environ, {'DXB_SHA': 'recipe', 'GITHUB_ENV': str(env)}), \
+                 patch.object(cache, 'command', return_value='recipe'), \
+                 patch.object(cache, 'reset_sources'), \
+                 patch.object(cache.subprocess, 'run') as run:
+                cache.prepare(workspace, 'full')
+            self.assertEqual(env.read_text(), 'CCACHE=\nCCACHE_DISABLE=1\n')
+            run.assert_not_called()
 
 
 if __name__ == '__main__':
