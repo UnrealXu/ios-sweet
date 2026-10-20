@@ -1,0 +1,69 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -151,6 +151,57 @@
+         printf("ACE UFS vendor: shipping XOUFS bit adopted; no reset/SMC/power-mode change\n");
+         return true;
+     }
++    bool init_uic(unsigned op,uint32_t attr,uint32_t value,uint32_t &answer) {
++        bool get=op==1 && (attr==0xd0a6 || attr==0xd0a1);
++        bool set=op==2 && (attr==0xd0a6 || attr==0xd0a1 || ((attr==0xd0a8 || attr==0x155e) && value==0));
++        bool startup=op==0x16 && attr==0 && value==0;
++        if(!(get || set || startup) || (get && value) || !inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3) {
++            printf("ACE UFS init: UIC guard refused op=%x attr=%04x; no command\n",op,attr);return false;
++        }
++        wr(0x94,attr<<16);wr(0x98,0);wr(0x9c,value);
++        uint64_t started=mach_absolute_time();wr(0x90,op);
++        if(!wait(0x20,0x400,0x400)) {
++            printf("ACE UFS init: UIC timeout op=%x attr=%04x IS=%08x HCS=%08x\n",op,attr,rd(0x20),rd(0x30));return false;
++        }
++        uint32_t status=rd(0x20),result=rd(0x98)&255;
++        answer=rd(0x9c);
++        printf("ACE UFS init: UIC op=%x attr=%04x sent=%08x rc=%02x value=%08x IS=%08x HCS=%08x ticks=%llu\n",op,attr,value,result,answer,status,rd(0x30),mach_absolute_time()-started);
++        uint32_t allowed=startup?0x504:0x400;
++        if(result || (status&~allowed) || !(status&0x400) || !inherited_ready() || (rd(0x144)&3)!=3) {
++            uint32_t words[5];snapshot("init UIC fault",words);
++            printf("ACE UFS init: UIC failed; no retry or transfer queue writes\n");return false;
++        }
++        wr(0x20,status&0x500); /* Only observed command/link-start completion. */
++        return true;
++    }
++    bool initialize_link_once() {
++        uint32_t value=0,ignored=0;
++        printf("ACE UFS init: begin MTK local pre-link and one LINK_STARTUP; no reset/SMC\n");
++        /* Shipped MTK pre_link: leave UniPro powerdown, disable host TX LCC,
++         * clear deep-stall bit. No peer command or PA_PWRMODE SET. */
++        if(!init_uic(2,0xd0a8,0,ignored) || !init_uic(2,0x155e,0,ignored) ||
++           !init_uic(1,0xd0a6,0,value) || !init_uic(2,0xd0a6,value&~0x40u,ignored) ||
++           !init_uic(0x16,0,0,ignored)) return false;
++        uint32_t first[5],second[5],third[5];
++        uint32_t s1=snapshot("link-start sample1",first);
++        IODelay(1000);
++        uint32_t s2=snapshot("link-start sample2",second);
++        if(!ace_ufs_cold_can_ack(s1,first,s2,second) || !inherited_ready()) {
++            printf("ACE UFS init: link-start error remains; no queue writes\n");return false;
++        }
++        if(s2&4) wr(0x20,4);
++        IODelay(1000);
++        uint32_t s3=snapshot("link-start sample3",third);
++        if(!ace_ufs_cold_final_ready(s3,third) || !inherited_ready()) {
++            printf("ACE UFS init: link-start state not ready; no queue writes\n");return false;
++        }
++        /* Shipped MTK post_link clock gating bits, preserving other fields. */
++        if(!init_uic(1,0xd0a6,0,value) || !init_uic(2,0xd0a6,value|0xdu,ignored) ||
++           !init_uic(1,0xd0a1,0,value) || !init_uic(2,0xd0a1,value&~0x20u,ignored)) return false;
++        if(!inspect_link_power()) return false;
++        printf("ACE UFS init: one link startup and MTK local configuration complete; proceeding to first NOP\n");
++        return true;
++    }
+     void run() {
+         printf("ACE UFS read: inherited UTRL=%08x:%08x TM=%08x:%08x DBR=%08x/%08x AHIT=%08x HCS=%08x\n",rd(0x54),rd(0x50),rd(0x74),rd(0x70),rd(0x58),rd(0x78),rd(0x18),rd(0x30));
+         if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1) || rd(0x08)!=0x200 ||
+@@ -175,7 +226,7 @@
+             printf("ACE UFS read: cold error reasserted/state changed; no queue writes\n");return;
+         }
+         printf("ACE UFS read: cold handoff quiescent after three samples; proceeding to bounded NOP\n");
+-        if(!inspect_link_power() || !adopt_vendor_control()) return;
++        if(!inspect_link_power() || !adopt_vendor_control() || !initialize_link_once()) return;
+         dma=0;
+         if(kmem_alloc_contig(kernel_map,&dma,ACE_UFS_ARENA,0x3fff,0,0,
+             (kma_flags_t)(KMA_DATA|KMA_ZERO|KMA_PERMANENT),VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
