@@ -1,0 +1,38 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -131,6 +131,26 @@
+         printf("ACE UFS link: local power/gear reads complete; no power-mode changes\n");
+         return true;
+     }
++    bool adopt_vendor_control() {
++        uint32_t old=rd(0x140);
++        printf("ACE UFS vendor: XOUFS before=%08x HCS=%08x REFCLK=%08x\n",old,rd(0x30),rd(0x144));
++        if(!inherited_ready() || rd(0x20)!=0 || (rd(0x144)&3)!=3 || (old!=2 && old!=0x82)) {
++            printf("ACE UFS vendor: unknown/busy state; no XOUFS write\n");return false;
++        }
++        /* Shipped MTK hce_enable_notify sets this bit before HCE enable.
++         * This isolated inherited-host experiment does not repeat its reset,
++         * crypto SMC or HCE toggle. Its effect here remains unproven. */
++        if(old==2) wr(0x140,old|0x80);
++        IODelay(1000);
++        uint32_t now=rd(0x140),words[5];
++        uint32_t status=snapshot("post-XOUFS",words);
++        printf("ACE UFS vendor: XOUFS after=%08x HCS=%08x REFCLK=%08x\n",now,rd(0x30),rd(0x144));
++        if(now!=0x82 || !inherited_ready() || (rd(0x144)&3)!=3 || !ace_ufs_cold_final_ready(status,words)) {
++            printf("ACE UFS vendor: readback/host/link changed; no transfer queue writes\n");return false;
++        }
++        printf("ACE UFS vendor: shipping XOUFS bit adopted; no reset/SMC/power-mode change\n");
++        return true;
++    }
+     void run() {
+         printf("ACE UFS read: inherited UTRL=%08x:%08x TM=%08x:%08x DBR=%08x/%08x AHIT=%08x HCS=%08x\n",rd(0x54),rd(0x50),rd(0x74),rd(0x70),rd(0x58),rd(0x78),rd(0x18),rd(0x30));
+         if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1) || rd(0x08)!=0x200 ||
+@@ -155,7 +175,7 @@
+             printf("ACE UFS read: cold error reasserted/state changed; no queue writes\n");return;
+         }
+         printf("ACE UFS read: cold handoff quiescent after three samples; proceeding to bounded NOP\n");
+-        if(!inspect_link_power()) return;
++        if(!inspect_link_power() || !adopt_vendor_control()) return;
+         dma=0;
+         if(kmem_alloc_contig(kernel_map,&dma,ACE_UFS_ARENA,0x3fff,0,0,
+             (kma_flags_t)(KMA_DATA|KMA_ZERO|KMA_PERMANENT),VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
