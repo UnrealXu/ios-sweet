@@ -1,0 +1,86 @@
+--- /dev/null
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -0,0 +1,60 @@
++/* Ace controller discovery only: no DMA, IRQ enable, reset or media service. */
++#include <pexpert/arm64/board_config.h>
++#if defined(ARM64_BOARD_CONFIG_ACE)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSData.h>
++#include <machine/machine_routines.h>
++#include <mach/vm_prot.h>
++
++/* Built-in board driver: declaration otherwise gated to MACH/PEXPERT private. */
++extern "C" vm_offset_t ml_io_map_with_prot(vm_offset_t, vm_size_t, vm_prot_t);
++
++class AceUFSController : public IOService {
++    OSDeclareDefaultStructors(AceUFSController);
++public:
++    bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(AceUFSController, IOService);
++
++static bool ace_ufs_u32(IOService *provider, const char *key, uint32_t expected)
++{
++    OSData *data = OSDynamicCast(OSData, provider->getProperty(key));
++    uint32_t value = 0;
++    if (!data || data->getLength() != sizeof(value)) return false;
++    bcopy(data->getBytesNoCopy(), &value, sizeof(value));
++    return value == expected;
++}
++
++bool AceUFSController::start(IOService *provider)
++{
++    OSData *data = OSDynamicCast(OSData, provider->getProperty("reg"));
++    uint64_t reg[2] = {};
++    if (!data || data->getLength() != sizeof(reg) ||
++        !ace_ufs_u32(provider, "ace,read-only-probe", 1) ||
++        !ace_ufs_u32(provider, "interrupt-intid", 169)) return false;
++    bcopy(data->getBytesNoCopy(), reg, sizeof(reg));
++    if (reg[0] != 0x112b0000 || reg[1] != 0x2300 || !IOService::start(provider)) return false;
++    printf("ACE UFS: read-only map begin base=0x%llx size=0x%llx\n", reg[0], reg[1]);
++    /* Permanent BSP mapping, read permission only. No unmappable-map API or
++     * unmap of this permanent mapping. Abort before any register access on failure. */
++    vm_offset_t mapped = ml_io_map_with_prot((vm_offset_t)reg[0], (vm_size_t)reg[1], VM_PROT_READ);
++    if (!mapped) { printf("ACE UFS: read-only map failed\n"); return false; }
++    volatile const uint32_t *hci = (volatile const uint32_t *)mapped;
++    uint32_t cap = hci[0x00/4], ver = hci[0x08/4];
++    uint32_t hcs = hci[0x30/4], hce = hci[0x34/4];
++    uint32_t status = hci[0x20/4], enable = hci[0x24/4];
++    uint32_t doorbell = hci[0x58/4], transfer = hci[0x60/4], task = hci[0x80/4];
++    printf("ACE UFS: CAP=0x%08x VER=0x%08x HCS=0x%08x HCE=0x%08x\n", cap, ver, hcs, hce);
++    printf("ACE UFS: IS=0x%08x IE=0x%08x UTRLDBR=0x%08x UTRLRSR=0x%08x UTMRLRSR=0x%08x\n", status, enable, doorbell, transfer, task);
++    printf("ACE UFS: 64AS=%u transfer-slots=%u task-slots=%u; discovery only, no media\n", (cap >> 24) & 1, (cap & 31) + 1, ((cap >> 16) & 7) + 1);
++    if (cap == 0 || cap == 0xffffffff || ver == 0 || ver == 0xffffffff) {
++        printf("ACE UFS: invalid/unavailable controller registers\n"); return false;
++    }
++    setProperty("ace,read-only-probe", true);
++    setProperty("ace,cap", cap, 32);
++    setProperty("ace,version", ver, 32);
++    registerService();
++    return true;
++}
++#endif
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -45,6 +45,12 @@
+     "     'IOClass'         = SweetCPU;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'ace,armv8-cpu';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++    "   {"
++    "     'IOClass'         = AceUFSController;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'ace,mt6895-ufs-hci-probe-v1';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+ #elif defined(ARM64_BOARD_CONFIG_SWEET)
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -20,3 +20,5 @@
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
++
++iokit/Kernel/arm/AceUFSController.cpp                            optional iokitcpp
