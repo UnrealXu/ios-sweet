@@ -1,0 +1,407 @@
+diff --git a/iokit/Kernel/arm/AceUFSController.cpp b/iokit/Kernel/arm/AceUFSController.cpp
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -10,10 +10,13 @@
+ #include <vm/pmap.h>
+ extern "C" {
+ #include <arm/caches_internal.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
+ }
+ #include <mach/mach_time.h>
+ #include "AceUFSReadProtocol.h"
+ #include "AceUFSRootGPT.h"
++#include "AceUFSRootIO.h"
+ #include "AceUFSDeviceInit.h"
+ #include "AceUFSResetAttention.h"
+ #include "AceUFSUICPolicy.h"
+@@ -44,11 +47,15 @@
+  * No other Ace service owns UFS; no crypto keys or write CDB.
+  * A source-backed one-time device reset release has separate strict gates. */
+ static volatile uint32_t ace_ufs_claimed;
++/* Publish immutable geometry and the permanent lock only after discovery.
++ * Readers never touch the singleton while the provider owns initialization. */
++static int ace_ufs_root_phase; /* 0 pending, 1 ready, -1 failed, -2 disabled */
++static IOLock *ace_ufs_root_lock;
+ struct AceUFSReadProbe {
+     vm_offset_t mmio, dma;
+     uint64_t pa;
+     /* Permanent singleton owns both the DMA page and validated GPT snapshot.
+-     * Never place the 16KiB array on a kernel stack. No BSD consumer yet. */
++     * Never place the 16KiB array on a kernel stack. One serialized BSD reader. */
+     bool quarantined, gpt_header_valid, root_ready;
+     struct ace_ufs_gpt_plan gpt_plan;
+     struct ace_ufs_root_bounds root_bounds;
+@@ -56,6 +63,7 @@
+     bool peer_read_issued;
+     bool nop_verified, device_init_attempted, init_set_issued;
+     unsigned init_reads_issued;
++    uint64_t root_reads_issued;
+     bool device_init_complete, lun2_readiness_attempted;
+     bool reset_attempted, cold_local_commands;
+     bool firmware_call_issued, reset_release_accepted;
+@@ -87,6 +95,8 @@
+         int len=query?((lun || lba || block)?-1:ace_ufs_device_init_request(a,ACE_UFS_ARENA,pa,op==ACE_UFS_INIT_SET?6:5)):
+             op==ACE_UFS_GPT_READ?(gpt_header_valid?
+                 ace_ufs_gpt_request(a,ACE_UFS_ARENA,pa,&gpt_plan,lun,lba,block):-1):
++                op==ACE_UFS_ROOT_READ?(root_ready?
++                    ace_ufs_root_request(a,ACE_UFS_ARENA,pa,&gpt_plan,&root_bounds,lun,lba,block):-1):
+                 ace_ufs_read_request(a,ACE_UFS_ARENA,pa,op,lun,lba,block);
+         if(len<0) return -2;
+         if(op==ACE_UFS_INIT_READ) init_reads_issued++;
+@@ -96,6 +106,10 @@
+          */
+         bool log_command=op!=ACE_UFS_INIT_READ || init_reads_issued<=3 ||
+             !(init_reads_issued&(init_reads_issued-1));
++        if(op==ACE_UFS_ROOT_READ) {
++            root_reads_issued++;
++            log_command=root_reads_issued<=3 || !(root_reads_issued&(root_reads_issued-1));
++        }
+         uint32_t request_crc=ace_ufs_crc32(a+ACE_UFS_UCD,32);
+         FlushPoC_DcacheRegion(dma,ACE_UFS_ARENA);__builtin_arm_dsb(0xf);
+         if(log_command) printf("ACE UFS read: submit op=%u lun=%u lba=%u bytes=%d\n",op,lun,lba,len);
+@@ -116,7 +130,7 @@
+             ace_ufs_reset_attention_response(r,512,lun) && status==1 && inherited_ready() &&
+             request_crc==ace_ufs_crc32(a+ACE_UFS_UCD,32);
+         bool invalid=ocs || (status&0x70884) || r[0]!=(query?0x36:op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || (r[6] && !reset_attention) || r[1] || (len && ace_ufs_be32(r+12));
+-        if(op==ACE_UFS_GPT_READ && (status!=1 || !inherited_ready() ||
++        if((op==ACE_UFS_GPT_READ || op==ACE_UFS_ROOT_READ) && (status!=1 || !inherited_ready() ||
+            !ace_ufs_gpt_good_response(r,512,lun) ||
+            request_crc!=ace_ufs_crc32(a+ACE_UFS_UCD,32))) invalid=true;
+         if(query) {
+@@ -688,14 +702,63 @@
+ 
+ static AceUFSReadProbe ace_ufs_owner;
+ 
++/* Internal kernel callers only. No new HBA adoption, reset, command retry,
++ * arbitrary LUN or media write is reachable through this bridge. */
++extern "C" int ace_ufs_root_geometry(uint64_t *bytes)
++{
++    int phase=__atomic_load_n(&ace_ufs_root_phase,__ATOMIC_ACQUIRE);
++    if(phase!=1) return phase==0?EAGAIN:phase==-2?ENXIO:EIO;
++    if(!bytes) return EINVAL;
++    *bytes=ace_ufs_owner.root_bounds.blocks*4096;
++    return 0;
++}
++
++extern "C" int ace_ufs_root_read(uint64_t offset,void *destination,size_t count,size_t *done)
++{
++    int phase=__atomic_load_n(&ace_ufs_root_phase,__ATOMIC_ACQUIRE);
++    if(phase!=1) return phase==0?EAGAIN:phase==-2?ENXIO:EIO;
++    AceUFSReadProbe &owner=ace_ufs_owner;
++    if(!done || (!destination && count) ||
++       !ace_gpt_disjoint(destination,count,done,sizeof(*done)) ||
++       !ace_gpt_disjoint(destination,count,&owner,sizeof(owner)) ||
++       !ace_gpt_disjoint(done,sizeof(*done),&owner,sizeof(owner)) ||
++       !ace_gpt_disjoint(destination,count,(void *)owner.dma,ACE_UFS_ARENA) ||
++       !ace_gpt_disjoint(done,sizeof(*done),(void *)owner.dma,ACE_UFS_ARENA) ||
++       !ace_gpt_disjoint(destination,count,(void *)owner.mmio,0x2300) ||
++       !ace_gpt_disjoint(done,sizeof(*done),(void *)owner.mmio,0x2300)) return EINVAL;
++    struct ace_ufs_root_slice slice;
++    if(ace_ufs_root_slice(&owner.gpt_plan,&owner.root_bounds,offset,count,&slice)) return EINVAL;
++    *done=0;
++    IOLockLock(ace_ufs_root_lock);
++    int error=0;
++    if(__atomic_load_n(&ace_ufs_root_phase,__ATOMIC_ACQUIRE)!=1 || owner.quarantined) error=EIO;
++    while(!error && *done<count) {
++        if(ace_ufs_root_slice(&owner.gpt_plan,&owner.root_bounds,offset+*done,count-*done,&slice)) {
++            error=EINVAL;break;
++        }
++        if(owner.command(ACE_UFS_ROOT_READ,2,slice.lba,4096)) {
++            __atomic_store_n(&ace_ufs_root_phase,-1,__ATOMIC_RELEASE);
++            error=EIO;break;
++        }
++        bcopy((const void *)(owner.dma+ACE_UFS_DATA+slice.skip),(uint8_t *)destination+*done,slice.bytes);
++        *done+=slice.bytes;
++    }
++    IOLockUnlock(ace_ufs_root_lock);
++    return error;
++}
++
++
+ bool AceUFSController::start(IOService *provider)
+ {
++    char rootName[32]={};
++    PE_parse_boot_argn("rd",rootName,sizeof(rootName));
++    bool publishRoot=strcmp(rootName,"aceufsroot0")==0;
+     OSData *data = OSDynamicCast(OSData, provider->getProperty("reg"));
+     uint64_t reg[2] = {};
+     bool commandRead = ace_ufs_u32(provider, "ace,command-read-probe", 1);
+     bool rootProbe = ace_ufs_u32(provider, "ace,root-read-probe", 1);
+     bool readOnly = ace_ufs_u32(provider, "ace,read-only-probe", 1);
+-    if ((rootProbe && !commandRead) || commandRead == readOnly || !data || data->getLength() != sizeof(reg) ||
++    if ((publishRoot && !rootProbe) || (rootProbe && !commandRead) || commandRead == readOnly || !data || data->getLength() != sizeof(reg) ||
+         !ace_ufs_u32(provider, "interrupt-intid", 169)) return false;
+     bcopy(data->getBytesNoCopy(), reg, sizeof(reg));
+     if (reg[0] != 0x112b0000 || reg[1] != 0x2300 || !IOService::start(provider)) return false;
+@@ -717,8 +780,18 @@
+     }
+     if (commandRead) {
+         if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1)) return false;
++        if(publishRoot) {
++            ace_ufs_root_lock=IOLockAlloc();
++            if(!ace_ufs_root_lock) {
++                __atomic_store_n(&ace_ufs_root_phase,-1,__ATOMIC_RELEASE);
++                return false;
++            }
++        }
+         ace_ufs_owner.mmio=mapped;
+         ace_ufs_owner.run(rootProbe);
++        int phase=publishRoot?(ace_ufs_owner.root_ready && !ace_ufs_owner.quarantined?1:-1):-2;
++        __atomic_store_n(&ace_ufs_root_phase,phase,__ATOMIC_RELEASE);
++        if(publishRoot) printf("ACE UFS BSD bridge: provider phase=%d; readonly userdata only\n",phase);
+         if(rootProbe) {
+             setProperty("ace,root-read-probe",true);
+             setProperty("ace,userdata-bounds-ready",ace_ufs_owner.root_ready);
+diff --git a/iokit/Kernel/arm/AceUFSRootIO.h b/iokit/Kernel/arm/AceUFSRootIO.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/AceUFSRootIO.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: MIT
++ * Read-only userdata mapping. Include the read protocol and GPT headers first.
++ * Refusal never changes the DMA arena or output plan. */
++#ifndef ACE_UFS_ROOT_IO_H
++#define ACE_UFS_ROOT_IO_H
++#define ACE_UFS_ROOT_READ 7u
++#define ACE_UFS_ROOT_MAX_IO 65536u
++struct ace_ufs_root_slice { uint32_t lba, skip, bytes; };
++static inline int ace_ufs_root_bounds_valid(const struct ace_ufs_gpt_plan *p,
++    const struct ace_ufs_root_bounds *r) {
++    return ace_gpt_plan_valid(p) && r && r->blocks &&
++        r->first_lba>=p->first_usable && r->first_lba<=p->last_usable &&
++        r->blocks<=p->last_usable-r->first_lba+1;
++}
++static inline int ace_ufs_root_slice(const struct ace_ufs_gpt_plan *p,
++    const struct ace_ufs_root_bounds *r,uint64_t offset,size_t count,
++    struct ace_ufs_root_slice *out) {
++    if(!ace_ufs_root_bounds_valid(p,r) || !out || count>ACE_UFS_ROOT_MAX_IO ||
++       !ace_gpt_disjoint(p,sizeof(*p),out,sizeof(*out)) ||
++       !ace_gpt_disjoint(r,sizeof(*r),out,sizeof(*out))) return -1;
++    uint64_t capacity=r->blocks*4096;
++    if(offset>capacity || count>capacity-offset) return -1;
++    struct ace_ufs_root_slice s={0,0,0};
++    if(count) {
++        s.lba=(uint32_t)(r->first_lba+offset/4096);
++        s.skip=(uint32_t)(offset%4096);
++        s.bytes=(uint32_t)(count<4096-s.skip?count:4096-s.skip);
++    }
++    *out=s;return 0;
++}
++static inline int ace_ufs_root_request(uint8_t *a,size_t bytes,uint64_t pa,
++    const struct ace_ufs_gpt_plan *p,const struct ace_ufs_root_bounds *r,
++    unsigned lun,unsigned lba,unsigned block) {
++    if(!ace_ufs_root_bounds_valid(p,r) || !a || bytes!=ACE_UFS_ARENA ||
++       !ace_gpt_disjoint(a,bytes,p,sizeof(*p)) ||
++       !ace_gpt_disjoint(a,bytes,r,sizeof(*r)) || lun!=2 || block!=4096 ||
++       lba<r->first_lba || lba-r->first_lba>=r->blocks) return -1;
++    int n=ace_ufs_read_request(a,bytes,pa,ACE_UFS_BLOCK,2,0,4096);
++    if(n<0) return n;
++    for(unsigned i=0;i<4;i++) a[ACE_UFS_UCD+18+i]=(uint8_t)(lba>>(24-8*i));
++    return n;
++}
++#endif
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -60,6 +60,10 @@
+ #define ROOTDEVICETIMEOUT       60
+ #endif
+ 
++#if defined(ARM64_BOARD_CONFIG_ACE)
++extern int ace_ufs_rootdev(dev_t *dev);
++#endif
++#line 63
+ extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
+ extern dev_t mdevlookup(int devid);
+ extern void mdevremoveall(void);
+@@ -766,6 +770,19 @@
+ 		}
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_ACE)
++	if (strcmp(rdBootVar, "aceufsroot0") == 0) {
++		OSSafeReleaseNULL(matching);
++		int error = ace_ufs_rootdev(root);
++		if (error) panic("IOFindBSDRoot: ACE readonly UFS unavailable: %d", error);
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++#endif
++
++#line 769
+ #if defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_ACE)
+ //
+ //	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,7 @@
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/ace_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/ace_ufs.c b/bsd/dev/ace_ufs.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/ace_ufs.c
+@@ -0,0 +1,154 @@
++/* ACE readonly BSD root facade. The IOKit singleton owns all UFS state.
++ * No MMIO, DMA allocation, HBA initialization or storage writes in this file. */
++#include <pexpert/arm64/board_config.h>
++#if defined(ARM64_BOARD_CONFIG_ACE)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <libkern/libkern.h>
++
++extern void IOSleep(unsigned milliseconds);
++extern int ace_ufs_root_geometry(uint64_t *bytes);
++extern int ace_ufs_root_read(uint64_t offset, void *destination, size_t count, size_t *done);
++int ace_ufs_rootdev(dev_t *dev);
++static LCK_GRP_DECLARE(ace_bsd_grp, "ace_ufs_bsd");
++static LCK_MTX_DECLARE(ace_bsd_init_lock, &ace_bsd_grp);
++static uint64_t ace_bytes;
++static dev_t ace_bdev;
++static int ace_bsd_ready;
++/* Static: never spend a 4KiB kernel stack on this read proof. */
++static uint8_t ace_read_proof[4096];
++
++static int
++ace_open(dev_t dev, int flags, __unused int type, __unused struct proc *p)
++{
++    uint64_t bytes;
++    if(minor(dev) || !__atomic_load_n(&ace_bsd_ready,__ATOMIC_ACQUIRE)) return ENXIO;
++    if(flags & FWRITE) return EROFS;
++    return ace_ufs_root_geometry(&bytes);
++}
++static int
++ace_close(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
++{
++    return 0;
++}
++static void
++ace_strategy(buf_t bp)
++{
++    uint32_t count=buf_count(bp);
++    size_t done=0;
++    caddr_t address=NULL;
++    int error=0;
++    uint64_t offset=0;
++    daddr64_t sector=buf_blkno(bp);
++    buf_setresid(bp,count);
++    if(!(buf_flags(bp)&B_READ)) {error=EROFS;goto finish;}
++    if(!__atomic_load_n(&ace_bsd_ready,__ATOMIC_ACQUIRE) || minor(buf_device(bp))) {error=ENXIO;goto finish;}
++    if(sector<0 || (uint64_t)sector>UINT64_MAX/DEV_BSIZE || count>65536) {error=EINVAL;goto finish;}
++    offset=(uint64_t)sector*DEV_BSIZE;
++    if(offset>ace_bytes || count>ace_bytes-offset) {error=EINVAL;goto finish;}
++    if(!count) goto finish;
++    if(buf_map(bp,&address)) {error=EIO;goto finish;}
++    error=ace_ufs_root_read(offset,address,count,&done);
++    /* Only the singleton may report progress; never underflow a BSD residual. */
++    if(done>count) {done=0;error=EIO;}
++    buf_setresid(bp,count-(uint32_t)done);
++    buf_unmap(bp);
++finish:
++    if(error) buf_seterror(bp,error);
++    buf_biodone(bp);
++}
++static int
++ace_ioctl(dev_t dev,u_long command,caddr_t data,__unused int flags,__unused struct proc *p)
++{
++    uint64_t bytes;
++    if(minor(dev) || !__atomic_load_n(&ace_bsd_ready,__ATOMIC_ACQUIRE)) return ENXIO;
++    int error=ace_ufs_root_geometry(&bytes);
++    if(error) return error;
++    switch(command) {
++    case DKIOCGETBLOCKSIZE: *(uint32_t *)data=DEV_BSIZE;return 0;
++    case DKIOCSETBLOCKSIZE: return *(uint32_t *)data==DEV_BSIZE?0:EINVAL;
++    case DKIOCGETPHYSICALBLOCKSIZE: *(uint32_t *)data=4096;return 0;
++    case DKIOCGETBLOCKCOUNT: *(uint64_t *)data=bytes/DEV_BSIZE;return 0;
++    case DKIOCISWRITABLE: *(uint32_t *)data=0;return 0;
++    case DKIOCGETMAXBLOCKCOUNTREAD: *(uint64_t *)data=65536/DEV_BSIZE;return 0;
++    case DKIOCGETMAXBLOCKCOUNTWRITE: *(uint64_t *)data=0;return 0;
++    case DKIOCGETMAXSEGMENTCOUNTREAD: *(uint64_t *)data=1;return 0;
++    case DKIOCGETMAXSEGMENTCOUNTWRITE: *(uint64_t *)data=0;return 0;
++    default: return ENOTTY;
++    }
++}
++static int ace_psize(__unused dev_t dev) {return -1;} /* capacity via 64-bit ioctl */
++static u_int ace_minphys(buf_t bp) {minphys(bp);if(buf_count(bp)>65536) buf_setcount(bp,65536);return buf_count(bp);}
++static int ace_read(dev_t dev,struct uio *uio,__unused int flags)
++{
++    return physio(ace_strategy,NULL,dev,B_READ,ace_minphys,uio,DEV_BSIZE);
++}
++static int ace_write(__unused dev_t dev,__unused struct uio *uio,__unused int flags) {return EROFS;}
++static const struct bdevsw ace_bsw={
++    .d_open=ace_open,.d_close=ace_close,.d_strategy=ace_strategy,.d_ioctl=ace_ioctl,
++    .d_dump=eno_dump,.d_psize=ace_psize,.d_type=D_DISK,
++};
++static const struct cdevsw ace_csw={
++    .d_open=ace_open,.d_close=ace_close,.d_read=ace_read,.d_write=ace_write,
++    .d_ioctl=ace_ioctl,.d_stop=eno_stop,.d_reset=eno_reset,.d_ttys=NULL,
++    .d_select=eno_select,.d_mmap=eno_mmap,.d_strategy=eno_strat,
++    .d_reserved_1=eno_getc,.d_reserved_2=eno_putc,.d_type=D_DISK,
++};
++static int
++ace_register(void)
++{
++    int error=EAGAIN;
++    /* Provider may still be running on the sole CPU. Sleep rather than spin. */
++    for(unsigned i=0;i<1000;i++) {
++        error=ace_ufs_root_geometry(&ace_bytes);
++        if(error!=EAGAIN) break;
++        IOSleep(10);
++    }
++    if(error) return error;
++    size_t done=0;
++    error=ace_ufs_root_read(0,ace_read_proof,sizeof(ace_read_proof),&done);
++    if(error || done!=sizeof(ace_read_proof)) return error?error:EIO;
++    uint32_t crc=0xffffffffu;
++    for(unsigned i=0;i<sizeof(ace_read_proof);i++) {
++        crc^=ace_read_proof[i];
++        for(unsigned j=0;j<8;j++) crc=(crc>>1)^(0xedb88320u&(0u-(crc&1)));
++    }
++    printf("ACE UFS BSD: userdata first4096 CRC32=%08x; readonly bridge read verified, no filesystem claim\n",~crc);
++    bzero(ace_read_proof,sizeof(ace_read_proof));
++    int bm=bdevsw_add(-1,&ace_bsw);
++    if(bm<0) return ENXIO;
++    int cm=cdevsw_add_with_bdev(-1,&ace_csw,bm);
++    if(cm<0) {bdevsw_remove(bm,&ace_bsw);return ENXIO;}
++    ace_bdev=makedev(bm,0);
++    void *block=devfs_make_node(ace_bdev,DEVFS_BLOCK,UID_ROOT,GID_OPERATOR,0640,"aceufsroot0");
++    void *raw=devfs_make_node(makedev(cm,0),DEVFS_CHAR,UID_ROOT,GID_OPERATOR,0640,"raceufsroot0");
++    if(!block || !raw) {
++        if(block) devfs_remove(block);
++        if(raw) devfs_remove(raw);
++        cdevsw_remove(cm,&ace_csw);bdevsw_remove(bm,&ace_bsw);
++        return ENXIO;
++    }
++    __atomic_store_n(&ace_bsd_ready,1,__ATOMIC_RELEASE);
++    printf("ACE UFS BSD: aceufsroot0 ready bytes=%llu sector=512 physical=4096 readonly\n",ace_bytes);
++    return 0;
++}
++int
++ace_ufs_rootdev(dev_t *dev)
++{
++    if(!dev) return EINVAL;
++    lck_mtx_lock(&ace_bsd_init_lock);
++    int error=__atomic_load_n(&ace_bsd_ready,__ATOMIC_ACQUIRE)?0:ace_register();
++    if(!error) *dev=ace_bdev;
++    lck_mtx_unlock(&ace_bsd_init_lock);
++    return error;
++}
++#endif
