@@ -1,0 +1,28 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -882,6 +882,24 @@
+ 		if (0 == (err = vfs_mountroot())) {
+ 			break;
+ 		}
++#if defined(ARM64_BOARD_CONFIG_ACE)
++		/* Explicit diagnostic disk only: retrying this same failed mount fills
++		 * the retained ring and destroys the trial token. Keep its first error
++		 * intact while the already armed firmware watchdog performs warm reset.
++		 * Do not feed, replace or program the watchdog here.
++		 */
++		{
++			char ace_requested_root[32] = { 0 };
++			if (PE_parse_boot_argn("rd", ace_requested_root, sizeof(ace_requested_root)) &&
++			    strcmp(ace_requested_root, "aceufsroot0") == 0) {
++				printf("ACE BSD root: first mount failed errno=%d; parking for firmware watchdog\n", err);
++				for (;;) {
++					__asm__ volatile ("wfe" ::: "memory");
++				}
++			}
++		}
++#endif
++#line 885
+ 		rootdevice[0] = '\0';
+ #if CONFIG_NETBOOT
+ 		if (netboot) {
