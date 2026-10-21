@@ -1,0 +1,59 @@
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -655,10 +655,36 @@
+ 	return true;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_ACE)
++/* Built-in Ace disk has its own readiness contract. Generic IOBSD resource
++ * matching can wait30s before even considering this explicitly named root.
++ * HFS registration already ran in vfsinit; provider access still waits with
++ * sleeps and refuses missing/failed geometry. No generic media substitution.
++ */
++static bool ace_find_explicit_root(char *name,unsigned size,dev_t *root,u_int32_t *flags)
++{
++    char requested[32]={};
++    if(!PE_parse_boot_argn("rd",requested,sizeof(requested)) ||
++       strcmp(requested,"aceufsroot0")) return false;
++    IOLog("ACE BSD root: explicit readonly path begin before generic resource wait\n");
++    int error=ace_ufs_rootdev(root);
++    if(error) panic("IOFindBSDRoot: ACE readonly UFS unavailable: %d",error);
++    strlcpy(name,requested,size);
++    *flags=0;
++    IOService::setRootMedia(NULL);
++    IOLog("ACE BSD root: explicit device %s major=%d minor=%d ready\n",name,major(*root),minor(*root));
++    return true;
++}
++#endif
++#line 654
+ kern_return_t
+ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+     dev_t * root, u_int32_t * oflags )
+ {
++#if defined(ARM64_BOARD_CONFIG_ACE)
++	if(ace_find_explicit_root(rootName,rootNameSize,root,oflags)) return kIOReturnSuccess;
++#endif
++#line 658
+ 	mach_timespec_t     t;
+ 	IOService *         service;
+ 	IORegistryEntry *   regEntry;
+@@ -769,18 +795,6 @@
+ 			regEntry->release();                                                            /* Toss the entry */
+ 		}
+ 	}
+-
+-#if defined(ARM64_BOARD_CONFIG_ACE)
+-	if (strcmp(rdBootVar, "aceufsroot0") == 0) {
+-		OSSafeReleaseNULL(matching);
+-		int error = ace_ufs_rootdev(root);
+-		if (error) panic("IOFindBSDRoot: ACE readonly UFS unavailable: %d", error);
+-		strlcpy(rootName, rdBootVar, rootNameSize);
+-		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+-		*oflags = 0;
+-		goto iofrootx;
+-	}
+-#endif
+ 
+ #line 769
+ #if defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_ACE)
