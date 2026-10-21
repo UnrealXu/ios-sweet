@@ -1,0 +1,242 @@
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -13,6 +13,7 @@
+ }
+ #include <mach/mach_time.h>
+ #include "AceUFSReadProtocol.h"
++#include "AceUFSRootGPT.h"
+ #include "AceUFSDeviceInit.h"
+ #include "AceUFSResetAttention.h"
+ #include "AceUFSUICPolicy.h"
+@@ -46,6 +47,12 @@
+ struct AceUFSReadProbe {
+     vm_offset_t mmio, dma;
+     uint64_t pa;
++    /* Permanent singleton owns both the DMA page and validated GPT snapshot.
++     * Never place the 16KiB array on a kernel stack. No BSD consumer yet. */
++    bool quarantined, gpt_header_valid, root_ready;
++    struct ace_ufs_gpt_plan gpt_plan;
++    struct ace_ufs_root_bounds root_bounds;
++    uint8_t gpt_entries[ACE_UFS_GPT_BYTES];
+     bool peer_read_issued;
+     bool nop_verified, device_init_attempted, init_set_issued;
+     unsigned init_reads_issued;
+@@ -66,13 +73,21 @@
+         return false;
+     }
+     int command(unsigned op,unsigned lun=0,unsigned lba=0,unsigned block=0) {
++        if(quarantined) return -7;
++        int result=command_inner(op,lun,lba,block);
++        if(result<0) quarantined=true; /* No reuse after any uncertain transfer. */
++        return result;
++    }
++    int command_inner(unsigned op,unsigned lun,unsigned lba,unsigned block) {
+         uint8_t *a=(uint8_t *)dma;
+         if(rd(0x58) || rd(0x78) || rd(0x50)!=(uint32_t)pa || rd(0x54)!=(uint32_t)(pa>>32) || !(rd(0x60)&1)) return -1;
+         bool query=op==ACE_UFS_INIT_SET || op==ACE_UFS_INIT_READ;
+         if(query && (!device_init_attempted || !device_init_ready() ||
+            (op==ACE_UFS_INIT_SET?init_set_issued:!init_set_issued))) return -1;
+         int len=query?((lun || lba || block)?-1:ace_ufs_device_init_request(a,ACE_UFS_ARENA,pa,op==ACE_UFS_INIT_SET?6:5)):
+-            ace_ufs_read_request(a,ACE_UFS_ARENA,pa,op,lun,lba,block);
++            op==ACE_UFS_GPT_READ?(gpt_header_valid?
++                ace_ufs_gpt_request(a,ACE_UFS_ARENA,pa,&gpt_plan,lun,lba,block):-1):
++                ace_ufs_read_request(a,ACE_UFS_ARENA,pa,op,lun,lba,block);
+         if(len<0) return -2;
+         if(op==ACE_UFS_INIT_READ) init_reads_issued++;
+         /* Preserve the current-token entry in the64KiB pmsg ring even if all
+@@ -101,6 +116,9 @@
+             ace_ufs_reset_attention_response(r,512,lun) && status==1 && inherited_ready() &&
+             request_crc==ace_ufs_crc32(a+ACE_UFS_UCD,32);
+         bool invalid=ocs || (status&0x70884) || r[0]!=(query?0x36:op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || (r[6] && !reset_attention) || r[1] || (len && ace_ufs_be32(r+12));
++        if(op==ACE_UFS_GPT_READ && (status!=1 || !inherited_ready() ||
++           r[4] || r[5] || r[8] || r[9] || r[10] || r[11] || r[32] || r[33] ||
++           request_crc!=ace_ufs_crc32(a+ACE_UFS_UCD,32))) invalid=true;
+         if(query) {
+             uint32_t flag=0xffffffffu;
+             if(ace_ufs_device_init_response(r,512,op==ACE_UFS_INIT_SET?6:5,&flag) ||
+@@ -572,9 +590,25 @@
+         }
+         return finish_link_configuration();
+     }
+-    void run() {
++    void discover_root() {
++        if(!gpt_header_valid || quarantined) {
++            printf("ACE UFS GPT: primary header not validated; no array reads\n");return;
++        }
++        for(unsigned lba=2;lba<=5;lba++) {
++            if(command(ACE_UFS_GPT_READ,2,lba,4096)) return;
++            bcopy((const void *)(dma+ACE_UFS_DATA),gpt_entries+(lba-2)*4096,4096);
++        }
++        int result=ace_ufs_gpt_userdata(gpt_entries,sizeof(gpt_entries),&gpt_plan,&root_bounds);
++        printf("ACE UFS GPT: complete primary array crc=%08x expected=%08x result=%d\n",
++            ace_ufs_crc32(gpt_entries,sizeof(gpt_entries)),gpt_plan.entries_crc,result);
++        if(result) return;
++        root_ready=true;
++        printf("ACE UFS GPT: userdata LUN2 first-lba=0x%llx blocks=0x%llx block-bytes=4096; discovery only, no BSD media or filesystem\n",
++            root_bounds.first_lba,root_bounds.blocks);
++    }
++    void run(bool root_probe) {
+         printf("ACE UFS read: inherited UTRL=%08x:%08x TM=%08x:%08x DBR=%08x/%08x AHIT=%08x HCS=%08x\n",rd(0x54),rd(0x50),rd(0x74),rd(0x70),rd(0x58),rd(0x78),rd(0x18),rd(0x30));
+-        if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1) || rd(0x08)!=0x200 ||
++        if(rd(0x08)!=0x200 ||
+            !(rd(0)&0x1000000) || (rd(0)&31)!=31 || !inherited_ready()) {
+             printf("ACE UFS read: inherited-state gate refused; no queue writes\n");return;
+         }
+@@ -633,6 +667,11 @@
+             if(command(ACE_UFS_BLOCK,2,lba,block)) return;
+             printf("ACE UFS read: LUN2 block%u CRC32=%08x first16=",lba,ace_ufs_crc32(b,block));
+             for(unsigned i=0;i<16;i++) printf("%02x",b[i]);printf(" MBR-signature=%02x%02x\n",b[510],b[511]);
++            if(lba==1 && root_probe) {
++                int result=ace_ufs_gpt_header(b,block,lastBlock,block,&gpt_plan);
++                gpt_header_valid=result==0;
++                printf("ACE UFS GPT: primary header validation=%d; no partition writes\n",result);
++            }
+             if(lba==1 && !memcmp(b,"EFI PART",8)) {
+                 uint32_t n=(uint32_t)b[12]|(uint32_t)b[13]<<8|(uint32_t)b[14]<<16|(uint32_t)b[15]<<24;
+                 uint32_t stored=(uint32_t)b[16]|(uint32_t)b[17]<<8|(uint32_t)b[18]<<16|(uint32_t)b[19]<<24;
+@@ -643,16 +682,20 @@
+             }
+         }
+         printf("ACE UFS read: bounded LUN2 blocks0/1 complete; no media published, no storage writes\n");
++        if(root_probe) discover_root();
+     }
+ };
++
++static AceUFSReadProbe ace_ufs_owner;
+ 
+ bool AceUFSController::start(IOService *provider)
+ {
+     OSData *data = OSDynamicCast(OSData, provider->getProperty("reg"));
+     uint64_t reg[2] = {};
+     bool commandRead = ace_ufs_u32(provider, "ace,command-read-probe", 1);
++    bool rootProbe = ace_ufs_u32(provider, "ace,root-read-probe", 1);
+     bool readOnly = ace_ufs_u32(provider, "ace,read-only-probe", 1);
+-    if (commandRead == readOnly || !data || data->getLength() != sizeof(reg) ||
++    if ((rootProbe && !commandRead) || commandRead == readOnly || !data || data->getLength() != sizeof(reg) ||
+         !ace_ufs_u32(provider, "interrupt-intid", 169)) return false;
+     bcopy(data->getBytesNoCopy(), reg, sizeof(reg));
+     if (reg[0] != 0x112b0000 || reg[1] != 0x2300 || !IOService::start(provider)) return false;
+@@ -672,7 +715,15 @@
+     if (cap == 0 || cap == 0xffffffff || ver == 0 || ver == 0xffffffff) {
+         printf("ACE UFS: invalid/unavailable controller registers\n"); return false;
+     }
+-    if (commandRead) {AceUFSReadProbe probe = {};probe.mmio = mapped;probe.run();}
++    if (commandRead) {
++        if(!__sync_bool_compare_and_swap(&ace_ufs_claimed,0,1)) return false;
++        ace_ufs_owner.mmio=mapped;
++        ace_ufs_owner.run(rootProbe);
++        if(rootProbe) {
++            setProperty("ace,root-read-probe",true);
++            setProperty("ace,userdata-bounds-ready",ace_ufs_owner.root_ready);
++        }
++    }
+     setProperty(commandRead ? "ace,command-read-probe" : "ace,read-only-probe", true);
+     setProperty("ace,cap", cap, 32);
+     setProperty("ace,version", ver, 32);
+--- /dev/null
++++ b/iokit/Kernel/arm/AceUFSRootGPT.h
+@@ -0,0 +1,104 @@
++/* SPDX-License-Identifier: MIT
++ * Ace LUN2 primary GPT discovery only. No media writes or root publication.
++ * Deliberately supports the observed 4096-byte/128x128 layout only.
++ * Requires the read-probe header first (also inside the kernel patch). */
++#ifndef ACE_UFS_ROOT_GPT_H
++#define ACE_UFS_ROOT_GPT_H
++#define ACE_UFS_GPT_BYTES 16384u
++#define ACE_UFS_GPT_READ 6u
++struct ace_ufs_gpt_plan {
++    uint64_t last_lba, first_usable, last_usable;
++    uint32_t entries_crc;
++};
++struct ace_ufs_root_bounds { uint64_t first_lba, blocks; };
++static inline uint32_t ace_gpt_le32(const uint8_t *p) {
++    return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;
++}
++static inline uint64_t ace_gpt_le64(const uint8_t *p) {
++    return ace_gpt_le32(p)|(uint64_t)ace_gpt_le32(p+4)<<32;
++}
++static inline int ace_gpt_nonzero(const uint8_t *p,size_t n) {
++    unsigned any=0;for(size_t i=0;i<n;i++) any|=p[i];return any!=0;
++}
++static inline int ace_gpt_same(const uint8_t *a,const uint8_t *b,size_t n) {
++    unsigned diff=0;for(size_t i=0;i<n;i++) diff|=a[i]^b[i];return diff==0;
++}
++static inline int ace_gpt_disjoint(const void *a,size_t n,const void *b,size_t m) {
++    uintptr_t x=(uintptr_t)a,y=(uintptr_t)b;
++    return x<=UINTPTR_MAX-n && y<=UINTPTR_MAX-m && (x+n<=y || y+m<=x);
++}
++static inline int ace_gpt_plan_valid(const struct ace_ufs_gpt_plan *p) {
++    return p && p->last_lba>=11 && p->last_lba<UINT32_MAX &&
++        p->first_usable>=6 && p->first_usable<=p->last_usable &&
++        p->last_usable<=p->last_lba-5;
++}
++/* Caller supplies the independently read capacity. Input is never modified;
++ * all refusal paths leave output unchanged, including input/output aliases. */
++static inline int ace_ufs_gpt_header(const uint8_t *b,size_t bytes,
++    uint64_t last_lba,unsigned block,struct ace_ufs_gpt_plan *out) {
++    static const uint8_t magic[8]={'E','F','I',' ','P','A','R','T'};
++    if(!b || !out || bytes!=4096 || block!=4096 ||
++       !ace_gpt_disjoint(b,bytes,out,sizeof(*out)) || !ace_gpt_same(b,magic,8) ||
++       ace_gpt_le32(b+8)!=0x10000 || ace_gpt_le32(b+12)!=92 ||
++       ace_gpt_le32(b+20) || ace_gpt_le64(b+24)!=1 ||
++       ace_gpt_le64(b+32)!=last_lba ||
++       ace_gpt_le64(b+72)!=2 || ace_gpt_le32(b+80)!=128 ||
++       ace_gpt_le32(b+84)!=128) return -1;
++    struct ace_ufs_gpt_plan p={last_lba,ace_gpt_le64(b+40),ace_gpt_le64(b+48),ace_gpt_le32(b+88)};
++    if(!ace_gpt_plan_valid(&p)) return -1;
++    uint32_t crc=0xffffffffu;
++    for(unsigned i=0;i<92;i++) {
++        crc^=(i>=16 && i<20)?0:b[i];
++        for(unsigned j=0;j<8;j++) crc=(crc>>1)^(0xedb88320u&(0u-(crc&1)));
++    }
++    if(~crc!=ace_gpt_le32(b+16)) return -2;
++    *out=p;return 0;
++}
++/* Only the four primary entry-array sectors, after a validated header.
++ * This does not extend the historical BLOCK probe beyond LBA0/1. */
++static inline int ace_ufs_gpt_request(uint8_t *a,size_t bytes,uint64_t pa,
++    const struct ace_ufs_gpt_plan *plan,unsigned lun,unsigned lba,unsigned block) {
++    if(!ace_gpt_plan_valid(plan) || !a || bytes!=ACE_UFS_ARENA ||
++       !ace_gpt_disjoint(a,bytes,plan,sizeof(*plan)) || lun!=2 ||
++       lba<2 || lba>5 || block!=4096) return -1;
++    int n=ace_ufs_read_request(a,bytes,pa,ACE_UFS_BLOCK,2,0,4096);
++    if(n<0) return n;
++    uint8_t *c=a+ACE_UFS_UCD;
++    for(unsigned i=0;i<4;i++) c[18+i]=(uint8_t)(lba>>(24-8*i));
++    return n;
++}
++static inline int ace_gpt_userdata(const uint8_t *p) {
++    static const uint8_t name[16]={'u',0,'s',0,'e',0,'r',0,'d',0,'a',0,'t',0,'a',0};
++    return ace_gpt_same(p+56,name,16) && !ace_gpt_nonzero(p+72,56);
++}
++/* Verify the entire array before selecting the exact UTF16LE userdata name.
++ * Reject duplicate identities/names, overlaps and out-of-device partitions.
++ * No fallback to another partition, and no filesystem claim. */
++static inline int ace_ufs_gpt_userdata(const uint8_t *b,size_t bytes,
++    const struct ace_ufs_gpt_plan *plan,struct ace_ufs_root_bounds *out) {
++    if(!b || !out || bytes!=ACE_UFS_GPT_BYTES || !ace_gpt_plan_valid(plan) ||
++       !ace_gpt_disjoint(b,bytes,out,sizeof(*out)) ||
++       !ace_gpt_disjoint(plan,sizeof(*plan),out,sizeof(*out))) return -1;
++    if(ace_ufs_crc32(b,bytes)!=plan->entries_crc) return -2;
++    struct ace_ufs_root_bounds found={0,0};unsigned matches=0;
++    for(unsigned i=0;i<128;i++) {
++        const uint8_t *p=b+i*128;
++        if(!ace_gpt_nonzero(p,16)) continue;
++        uint64_t first=ace_gpt_le64(p+32),last=ace_gpt_le64(p+40);
++        if(!ace_gpt_nonzero(p+16,16) || first>last ||
++           first<plan->first_usable || last>plan->last_usable) return -3;
++        for(unsigned j=0;j<i;j++) {
++            const uint8_t *q=b+j*128;
++            if(!ace_gpt_nonzero(q,16)) continue;
++            if(ace_gpt_same(p+16,q+16,16) ||
++               (first<=ace_gpt_le64(q+40) && ace_gpt_le64(q+32)<=last)) return -3;
++        }
++        if(ace_gpt_userdata(p)) {
++            if(++matches!=1) return -4;
++            found.first_lba=first;found.blocks=last-first+1;
++        }
++    }
++    if(matches!=1) return -4;
++    *out=found;return 0;
++}
++#endif
