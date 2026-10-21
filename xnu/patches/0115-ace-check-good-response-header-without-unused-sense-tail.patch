@@ -1,0 +1,31 @@
+--- a/iokit/Kernel/arm/AceUFSRootGPT.h
++++ b/iokit/Kernel/arm/AceUFSRootGPT.h
+@@ -67,6 +67,17 @@
+     for(unsigned i=0;i<4;i++) c[18+i]=(uint8_t)(lba>>(24-8*i));
+     return n;
+ }
++/* Narrow GOOD response for these fixed reads: a zero data-segment length
++ * means bytes32+ are not part of the response. Actual Ace leaves those bytes
++ * poisoned. Validate the complete 32B header, never unused sense storage.
++ * Linux v5.10 ufshcd_scsi_cmd_status handles GOOD without copying sense data:
++ * https://raw.githubusercontent.com/torvalds/linux/v5.10/drivers/scsi/ufs/ufshcd.c
++ */
++static inline int ace_ufs_gpt_good_response(const uint8_t *r,size_t bytes,unsigned lun) {
++    if(!r || bytes!=512 || lun!=2 || r[0]!=0x21 || r[2]!=lun) return 0;
++    for(unsigned i=0;i<32;i++) if(i!=0 && i!=2 && r[i]) return 0;
++    return 1;
++}
+ static inline int ace_gpt_userdata(const uint8_t *p) {
+     static const uint8_t name[16]={'u',0,'s',0,'e',0,'r',0,'d',0,'a',0,'t',0,'a',0};
+     return ace_gpt_same(p+56,name,16) && !ace_gpt_nonzero(p+72,56);
+--- a/iokit/Kernel/arm/AceUFSController.cpp
++++ b/iokit/Kernel/arm/AceUFSController.cpp
+@@ -117,7 +117,7 @@
+             request_crc==ace_ufs_crc32(a+ACE_UFS_UCD,32);
+         bool invalid=ocs || (status&0x70884) || r[0]!=(query?0x36:op==ACE_UFS_NOP?0x20:0x21) || r[2]!=lun || r[3]!=0 || (r[6] && !reset_attention) || r[1] || (len && ace_ufs_be32(r+12));
+         if(op==ACE_UFS_GPT_READ && (status!=1 || !inherited_ready() ||
+-           r[4] || r[5] || r[8] || r[9] || r[10] || r[11] || r[32] || r[33] ||
++           !ace_ufs_gpt_good_response(r,512,lun) ||
+            request_crc!=ace_ufs_crc32(a+ACE_UFS_UCD,32))) invalid=true;
+         if(query) {
+             uint32_t flag=0xffffffffu;
