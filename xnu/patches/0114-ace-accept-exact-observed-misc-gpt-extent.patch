@@ -1,0 +1,30 @@
+--- a/iokit/Kernel/arm/AceUFSRootGPT.h
++++ b/iokit/Kernel/arm/AceUFSRootGPT.h
+@@ -71,6 +71,17 @@
+     static const uint8_t name[16]={'u',0,'s',0,'e',0,'r',0,'d',0,'a',0,'t',0,'a',0};
+     return ace_gpt_same(p+56,name,16) && !ace_gpt_nonzero(p+72,56);
+ }
++/* Observed PGKM10 256GB primary GPT declares first-usable34 but entry0
++ * misc occupies8..135. It is outside the four-block primary array and cannot
++ * become userdata. Permit only this exact observed exception; still check its
++ * identity, full array CRC and overlap with every other used partition. */
++static inline int ace_gpt_ace_misc(const uint8_t *p,unsigned index,
++    const struct ace_ufs_gpt_plan *plan,uint64_t first,uint64_t last) {
++    static const uint8_t name[8]={'m',0,'i',0,'s',0,'c',0};
++    return index==0 && plan->last_lba==62480383 && plan->first_usable==34 &&
++        first==8 && last==135 && !ace_gpt_le64(p+48) &&
++        ace_gpt_same(p+56,name,8) && !ace_gpt_nonzero(p+64,64);
++}
+ /* Verify the entire array before selecting the exact UTF16LE userdata name.
+  * Reject duplicate identities/names, overlaps and out-of-device partitions.
+  * No fallback to another partition, and no filesystem claim. */
+@@ -86,7 +97,8 @@
+         if(!ace_gpt_nonzero(p,16)) continue;
+         uint64_t first=ace_gpt_le64(p+32),last=ace_gpt_le64(p+40);
+         if(!ace_gpt_nonzero(p+16,16) || first>last ||
+-           first<plan->first_usable || last>plan->last_usable) return -3;
++           (first<plan->first_usable && !ace_gpt_ace_misc(p,i,plan,first,last)) ||
++           last>plan->last_usable) return -3;
+         for(unsigned j=0;j<i;j++) {
+             const uint8_t *q=b+j*128;
+             if(!ace_gpt_nonzero(q,16)) continue;
