@@ -2,6 +2,9 @@
 
 ## ACTIVE HANDOFF: computer transfer snapshot (2026-10-21)
 
+- Published snapshot e7a697de1edb63c065f03a5d5820f93f2cd71d73; fetched
+  remote tree5baff89bc870e14cd7343ecd729f9881b0552111 exactly matches
+  local d3a6d76889f470432f6cef98c25ad522957aec61 source tree.
 - User requested Git upload for continuing on another computer; physical experiments
   stopped. Source baseline5e5f7cd; transfer branch codex/ace-handoff-20261021 in
   UnrealXu/ios-sweet. See handoff/20261021/README.md for clone and resume steps.
