@@ -188,7 +188,7 @@ def main():
            '-device', f'loader,file={out}/stub.bin,addr={STUB_PA:#x},force-raw=on',
            '-device', f'loader,addr={STUB_PA:#x},cpu-num=0']
     if a.gdb:
-        cmd += ['-S', '-gdb', 'tcp::1234']
+        cmd += ['-S', '-gdb', 'tcp:127.0.0.1:1234']
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
     if a.gdb:
         print('gdb stub on :1234; QMP socket:', mon, file=sys.stderr)

@@ -1,0 +1,2 @@
+# Unified patch context contains required whitespace prefixes.
+xnu/patches/*.patch -whitespace

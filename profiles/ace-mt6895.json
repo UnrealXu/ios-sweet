@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "target": "ace-mt6895",
+  "model": "PGKM10",
+  "soc": "MT6895",
+  "status": "diagnostic-native-entry-verified-ios-unfinished",
+  "source": {
+    "kind": "stock-vendor-boot-dtb",
+    "firmware": "PGKM10_15.0.0.1800_CN01",
+    "vendor_boot_sha256": "bb5a094de2f3396b9be3b20354d637092ef57d1355413b784cd863f222839670",
+    "boot_sha256": "6ab84213977b384d058d3c48545d23654313f5639b7a28fabfb3712dd9c57969",
+    "dtb_sha256": "2c262dd06c7fbc715ebd9462381addcb3ca92fb6b0bd6a6ec379893713fbfb91"
+  },
+  "cpu_affinities": [
+    0,
+    256,
+    512,
+    768,
+    1024,
+    1280,
+    1536,
+    1792
+  ],
+  "gic": {
+    "distributor": 201326592,
+    "redistributor": 201588736
+  },
+  "timer": {
+    "frequency": 13000000,
+    "virtual_intid": 27
+  },
+  "psci_conduit": "smc",
+  "boot_header_version": 4,
+  "unresolved": [
+    "verified-temporary-custom-code-entry-method",
+    "verified-restore-path",
+    "final-dynamic-reserved-memory",
+    "nonsecure-gic-and-timer-delivery",
+    "framebuffer-and-command-mode-refresh",
+    "mtk-ufs-driver-and-lun-layout",
+    "mtk-touch-and-buttons",
+    "ace-xnu-platform-and-boot-image"
+  ],
+  "ios_deployable": false,
+  "live_cpu_corroboration": {
+    "date": "2026-10-19",
+    "method": "normal register-only module load, taskset single-CPU affinity, normal unload",
+    "kernel_release": "5.10.236-android12-9-o-g6973d81cd2ac",
+    "cpu_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "midr_by_cluster": {
+      "0-3": "0x412fd050",
+      "4-7": "0x411fd411"
+    },
+    "id_aa64mmfr0_el1": "0x101122",
+    "tgran16": 1,
+    "cntfrq_hz": 13000000,
+    "source_module_sha256": "12655d3b3d8ecc3818d4541c800416975335cba37da2ef59f9cc228da3eac782",
+    "scope": "CPU identification and capability only; not a 16K page table execution or iOS boot test"
+  },
+  "live_storage_corroboration": {
+    "date": "2026-10-19",
+    "method": "Android sysfs SCSI H:C:T:L and CRC-checked GPT read",
+    "ordinary_luns": {
+      "sda": 0,
+      "sdb": 1,
+      "sdc": 2
+    },
+    "logical_block_bytes": 4096,
+    "userdata": {
+      "lun": 2,
+      "partition_index": 80,
+      "first_lba": 3514368,
+      "last_lba": 62476279,
+      "bytes": 241507991552
+    },
+    "scope": "Android OEM stack reads; no baremetal UFS/DMA execution"
+  },
+  "live_display_snapshot": {
+    "date": "2026-10-19",
+    "source": "DRM debugfs state; temporary mount removed",
+    "width": 1080,
+    "height": 2412,
+    "refresh_hz": 120,
+    "primary_fourcc": "XB24",
+    "primary_pitch_bytes": 4352,
+    "primary_modifier": 0,
+    "dma_address_observed": false,
+    "scope": "Android current scanout snapshot; not bootloader framebuffer handoff"
+  },
+  "live_pmsg_header": {
+    "date": "2026-10-19",
+    "method": "normal read-only module load/unload; identical WC alias of actual pmsg resource",
+    "physical_address": "0x48160000",
+    "signature": "0x43474244",
+    "start": 288,
+    "size": 288,
+    "capacity_bytes": 65524,
+    "ecc": 0,
+    "same_boot_and_taint_unchanged": true,
+    "source_module_sha256": "c15323b76d08c75921ee31601cf85de9788402e707e8517ad698c83fffeea5b4",
+    "scope": "Current Android header observation only; baremetal writes/cache/reset retention unverified"
+  },
+  "observed_fastboot": {
+    "date": "2026-10-19",
+    "product": "k6895v1_64",
+    "current_slot": "b",
+    "unlocked": true,
+    "userspace": false,
+    "max_download_bytes": 67108864,
+    "exact_current_image_download_accepted": true,
+    "boot_command_supported": false,
+    "boot_command_error": "unknown command",
+    "android_recovered": true,
+    "boot_and_vendor_boot_hashes_unchanged": true,
+    "custom_image_executed": false,
+    "scope": "Actual boot command test on current LK; other OEM launch paths remain unverified"
+  },
+  "entry_options_corroboration": {
+    "date": "2026-10-19",
+    "stock_kernel_standard_kexec": false,
+    "stock_kernel_kexec_file": false,
+    "standard_fastbootd_boot_handler": false,
+    "fastbootd_scope": "AOSP15 reference, not measured OEM recovery",
+    "lk_continue": "acknowledge, exit dispatcher, notify storage Linux boot thread",
+    "lk_continue_download_ram_launch_observed": false,
+    "lk_prefix_miss_failure": "unknown command",
+    "custom_ram_entry_verified": false,
+    "evidence_kind": "exact stock config/live headers and byte-preserving static LK analysis; no new runtime launch test",
+    "reference_document": "docs/ACE-ENTRY-OPTIONS.zh-CN.md"
+  },
+  "live_irq_timer_observation": {
+    "date": "2026-10-19",
+    "method": "eight normal readonly module load/unload pairs pinned to CPUs0-7",
+    "current_el": 1,
+    "cntfrq_hz": 13000000,
+    "cntv_ctl_el0": "0x1",
+    "icc_sre_el1": "0x7",
+    "icc_ctlr_el1": "0x8400",
+    "icc_pmr_el1": "0xf0",
+    "icc_igrpen1_el1": "0x1",
+    "icc_bpr1_el1": "0x3",
+    "mpidr_el1_by_cpu": {
+      "0": "0x81000000",
+      "1": "0x81000100",
+      "2": "0x81000200",
+      "3": "0x81000300",
+      "4": "0x81000400",
+      "5": "0x81000500",
+      "6": "0x81000600",
+      "7": "0x81000700"
+    },
+    "timer_gic_intid": 27,
+    "android_timer_irq_progress_all_cpus": true,
+    "same_boot_and_taint_unchanged": true,
+    "source_module_sha256": "6e19e1b09c6d57d02131716b9c36fd458e495bd47fafd068660415737dc69398",
+    "scope": "Running Android observation only; not cold-boot IRQ delivery, SMP release, XNU or iOS"
+  },
+  "oem_fastbootd_artifact_corroboration": {
+    "date": "2026-10-19",
+    "carrier": "exact current vendor_boot_b; live read-only SHA matches backup",
+    "fastbootd_sha256": "0c7f65e119aad92a4e154792cf3ddac2a5a80c4f4fb1478233ea72de9d67a55d",
+    "mtk_hal_sha256": "db2c2f4fcee3764e90fad8619a35215f4e25641bd1492a52b4bcd2e74ac431fb",
+    "reviewed_constructor_handler_count": 18,
+    "boot_or_continue_registered_in_reviewed_constructor": false,
+    "download_handler_ram_execution_observed": false,
+    "extracted_mtk_hal_oem_handler": "unconditional unsupported status3",
+    "scope": "Static original artifact analysis only; no fastbootd mode/OEM command execution or complete firmware negative proof"
+  },
+  "observed_custom_flash_entry": {
+    "date": "2026-10-19",
+    "method": "one explicitly authorized boot_b flash; diagnostic prefix then byte-identical Android kernel",
+    "candidate_sha256": "e2d7475e99d3449e7dbcf16e473a65a27a8f3ceae19278744ae32b3601ed834d",
+    "physical_stock_kernel_entry": "0x40200000",
+    "incoming_fdt_pa": "0x47c80000",
+    "incoming_el_observed": 1,
+    "active_sctlr": "0x30d00800",
+    "mmu_enabled": false,
+    "dcache_enabled": false,
+    "midr": "0x412fd050",
+    "mmfr0": "0x101122",
+    "cntfrq_hz": 13000000,
+    "ordinary_reboot_pmsg_record_retrieved": true,
+    "first_fastboot_reboot_pmsg_record_retrieved": false,
+    "original_kernel_byte_identity_preserved": true,
+    "android_boot_completed": true,
+    "root_and_selinux_enforcing": true,
+    "vendor_boot_unchanged": true,
+    "backup_restoration_verified": false,
+    "scope": "Actual diagnostic native entry and ordinary-reboot log path, not XNU/iOS/EL2/16K mappings/MTK native drivers"
+  }
+}

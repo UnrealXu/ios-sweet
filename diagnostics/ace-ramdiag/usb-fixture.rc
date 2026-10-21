@@ -1,0 +1,27 @@
+# QEMU dummy_hcd fixture only. No physical UDC or persistent filesystem.
+on early-init
+    mkdir /config 0755 root root
+    mount configfs none /config
+    mkdir /config/usb_gadget/ace 0700 root root
+    write /config/usb_gadget/ace/idVendor 0x18d1
+    write /config/usb_gadget/ace/idProduct 0xd001
+    write /config/usb_gadget/ace/bcdUSB 0x0200
+    mkdir /config/usb_gadget/ace/strings/0x409 0700 root root
+    write /config/usb_gadget/ace/strings/0x409/serialnumber RAMDIAG_QEMU_FIXTURE
+    write /config/usb_gadget/ace/strings/0x409/manufacturer RAMDIAG
+    write /config/usb_gadget/ace/strings/0x409/product RAM-only-ADB-fixture
+    mkdir /config/usb_gadget/ace/functions/ffs.adb 0700 root root
+    mkdir /config/usb_gadget/ace/configs/c.1 0700 root root
+    mkdir /dev/usb-ffs 0700 root root
+    mkdir /dev/usb-ffs/adb 0700 root root
+    mount functionfs adb /dev/usb-ffs/adb uid=0,gid=0,rmode=0500,fmode=0600
+    setprop sys.usb.configfs 1
+    setprop sys.usb.ffs.aio_compat 1
+    setprop sys.ace.usb.fixture.bind_attempted 0
+
+# Immediate init trigger avoids adbd's first FunctionFS-bind timeout.
+# Mark attempted even if the write fails; the probe checks actual readback.
+on property:sys.usb.ffs.ready=1 && property:sys.ace.usb.fixture.bind_attempted=0
+    symlink /config/usb_gadget/ace/functions/ffs.adb /config/usb_gadget/ace/configs/c.1/adb
+    write /config/usb_gadget/ace/UDC dummy_udc.0
+    setprop sys.ace.usb.fixture.bind_attempted 1

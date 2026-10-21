@@ -1,0 +1,65 @@
+[
+  {
+    "dt_path": "/soc/usb0@11201000",
+    "driver": "mtu3",
+    "module": "mtu3",
+    "class_path": "/sys/class/udc/11201000.usb0",
+    "check_properties": [
+      "reg",
+      "compatible"
+    ],
+    "source": "drivers/usb/mtu3/mtu3_plat.c",
+    "sha256": "edbe0506936f3be991dda1867056fb19c6cf1051cdb5ccdc0bb0f32d4b838d61",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/usb/mtu3/mtu3_plat.c",
+    "supporting_sources": [
+      {
+        "source": "drivers/usb/mtu3/mtu3.h",
+        "sha256": "7d5ebcd262cf6e65ef7b26bebbf427fefeacf3f190762188798865e48097b881",
+        "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/usb/mtu3/mtu3.h"
+      }
+    ]
+  },
+  {
+    "dt_path": "/soc/ufshci@112b0000",
+    "driver": "ufshcd-mtk",
+    "module": "ufs_mediatek_mod",
+    "class_path": "",
+    "check_properties": [
+      "reg",
+      "compatible"
+    ],
+    "source": "drivers/scsi/ufs/ufs-mediatek.c",
+    "sha256": "10e6ab96dfe818f4f4a2497bee7a0ea0b66a0e42078fc10894d154fbee98ee64",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/scsi/ufs/ufs-mediatek.c"
+  },
+  {
+    "dt_path": "/soc/watchdog@1c007000",
+    "driver": "mtk-wdt",
+    "module": "mtk_wdt",
+    "early": true,
+    "class_path": "",
+    "check_properties": [
+      "reg",
+      "compatible"
+    ],
+    "source": "drivers/watchdog/mtk_wdt.c",
+    "sha256": "82309c7e3c0f49e5c177b8f46b1a228e58483d100ba64df4e131d6b60cbe6ff6",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/watchdog/mtk_wdt.c"
+  },
+  {
+    "dt_path": "/soc/watchdog@1c007000/reboot-mode",
+    "driver": "syscon-reboot-mode",
+    "module": "syscon_reboot_mode",
+    "early": true,
+    "class_path": "",
+    "check_properties": [
+      "compatible",
+      "offset",
+      "mask",
+      "mode-bootloader"
+    ],
+    "source": "drivers/power/reset/syscon-reboot-mode.c",
+    "sha256": "3f27f3e6a3bf0b681e71ee05a9decaba7538bc3f293c2e229071f982f43b5082",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/power/reset/syscon-reboot-mode.c"
+  }
+]

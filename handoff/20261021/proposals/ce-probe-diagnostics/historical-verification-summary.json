@@ -1,0 +1,30 @@
+{
+  "status": "PASS actual EL1 production probe fields/DAIF refusal/full SIMD/sysreg fingerprint; controlled unsupported/EL fixtures",
+  "assembly_sha256": "200f62f7154eb6d7ff164bfa7a031c6a70442d806a5211224cbc79bd1bdea548",
+  "header_sha256": "a30f67d310dcc94a8b7a2bbb9cea46ddd4f69ba90ea47356a12e1aa4c5528cda",
+  "test_c_sha256": "f8bf01f846a5d2da882ab4a198939be17ce017bb64fc86c2d8c5908556138a3e",
+  "cases": [
+    {
+      "case": "production",
+      "returncode": 0,
+      "passed": true
+    },
+    {
+      "case": "sha-absent-FIXTURE",
+      "returncode": 0,
+      "passed": true
+    },
+    {
+      "case": "sha-unknown-FIXTURE",
+      "returncode": 0,
+      "passed": true
+    },
+    {
+      "case": "el2-FIXTURE",
+      "returncode": 0,
+      "passed": true
+    }
+  ],
+  "portable_harness_rerun": false,
+  "phone_io": false
+}

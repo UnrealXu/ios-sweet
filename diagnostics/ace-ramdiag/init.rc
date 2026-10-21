@@ -1,0 +1,39 @@
+# Controlled stage2 probe. No fstab, fsck, OEM imports, persistent mounts or modules.
+on early-init
+    copy /system/etc/ld.config.txt /linkerconfig/ld.config.txt
+    chmod 0444 /linkerconfig/ld.config.txt
+    start ueventd
+
+on init
+    export PATH /system/bin
+    symlink /proc/self/fd /dev/fd
+    # Original ueventd configuration is neutralized in the full overlay.
+    # adbd drops capabilities; supply standard RAM character-node permissions.
+    chmod 0666 /dev/null
+    chmod 0666 /dev/random
+    chmod 0666 /dev/urandom
+    start adbd
+    start ramdiag_probe
+
+service ueventd /system/bin/ueventd
+    user root
+    group root
+    seclabel u:r:ueventd:s0
+    disabled
+
+service adbd /system/bin/adbd --root_seclabel=u:r:recovery:s0 --device_banner=recovery
+    user root
+    group root
+    socket adbd stream 0600 root root
+    seclabel u:r:recovery:s0
+    disabled
+    oneshot
+    stdio_to_kmsg
+    setenv ADB_TRACE all
+
+service ramdiag_probe /system/bin/sh /ace-ramdiag/probe.sh
+    user root
+    group root
+    seclabel u:r:recovery:s0
+    disabled
+    oneshot

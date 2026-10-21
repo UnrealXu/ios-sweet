@@ -1,5 +1,26 @@
 # ios-sweet
 
+## Active Ace / MT6895 bring-up
+
+The current target is the OnePlus Ace PGKM10. Real phone logs prove XNU entry,
+virtual-memory bootstrap, platform expert registration and MAC framework
+initialization. The headless progress-image panic and unavailable RTC-service
+wait have been fixed and verified on the phone. The latest real log reaches
+VFS/HFS and network-stack initialization, then waits in root-device discovery. A token-bound automatic failure path is also physically verified:
+after one XNU attempt and watchdog reset, the same experimental image boots
+Android diagnostics; the computer collects logs and automatically returns the
+phone to Fastboot. No manual keys or original-backup restoration were used in
+that trial. Usable iOS and MTK storage, display and touch remain unfinished.
+See [the trial record](docs/ACE-XNU-PHONE-TRIAL.zh-CN.md).
+
+The user-selected workflow is to keep the latest experimental image installed
+between trials and continue debugging it. Original backups remain available;
+restoration is not an automatic step after every test. Ace does not support
+`fastboot boot`. The user's standing write authorization and backup protections are
+documented in [AGENTS.md](AGENTS.md).
+
+The following sections describe the original Redmi Note 10 Pro platform.
+
 **Apple's iOS 16 running on a Redmi Note 10 Pro.**
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.

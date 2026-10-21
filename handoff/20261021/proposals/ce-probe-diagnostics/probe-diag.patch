@@ -1,0 +1,46 @@
+--- a/ace/native-loader/sha_ce_guard.S
++++ b/ace/native-loader/sha_ce_guard.S
+@@ -101,4 +101,43 @@
+ probe_refuse:
+  mov w0,#-1
+  ret
++/* Diagnostic-only scalar probe; no authorization or FP/SIMD side effects.
++ * x0: writable aligned uint64_t observed[4] = CurrentEL, DAIF, ISAR0, CPACR.
++ * UINT64_MAX means that read did not complete. Return 0=complete, -1=EL,
++ * -2=DAIF, -3=unknown/absent SHA2. A higher-EL trap may prevent return.
++ * Caller publishes owned before-probe intent before this function. */
++.global native_sha_ce_probe_diag
++native_sha_ce_probe_diag:
++ mov x9,#-1
++ stp x9,x9,[x0]
++ stp x9,x9,[x0,#16]
++ mrs x9,CurrentEL
++ str x9,[x0]
++ cmp x9,#4
++ b.ne probe_diag_el
++ mrs x9,DAIF
++ str x9,[x0,#8]
++ and x10,x9,#0x3c0
++ cmp x10,#0x3c0
++ b.ne probe_diag_daif
++ mrs x9,ID_AA64ISAR0_EL1
++ str x9,[x0,#16]
++ ubfx x10,x9,#12,#4
++ cmp x10,#1
++ b.lo probe_diag_sha2
++ cmp x10,#2
++ b.hi probe_diag_sha2
++ mrs x9,CPACR_EL1
++ str x9,[x0,#24]
++ mov w0,#0
++ ret
++probe_diag_el:
++ mov w0,#-1
++ ret
++probe_diag_daif:
++ mov w0,#-2
++ ret
++probe_diag_sha2:
++ mov w0,#-3
++ ret
+ .section .note.GNU-stack,"",%progbits

@@ -1,0 +1,32 @@
+[
+  {
+    "before": "tcpc_mt6375.ko",
+    "consumer": "extcon-mtk-usb.ko",
+    "required_runtime_state": "the current type_c_port0 TCPC device is registered and accessible before extcon probes",
+    "reason": "extcon tcpc init returns ENODEV if named TCPC is absent; probe only logs failure and returns zero, so deferred-probe retry is not assured",
+    "source": "drivers/misc/mediatek/extcon/extcon-mtk-usb.c",
+    "sha256": "9e7ce0147a3ad78795a5caa224a59e6e658fefe5e839c627590e698207756cb4",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/misc/mediatek/extcon/extcon-mtk-usb.c",
+    "source_ranges": [
+      "320-334",
+      "566-577"
+    ],
+    "required_sysfs_path": "/sys/class/tcpc/type_c_port0",
+    "supporting_sources": [
+      {
+        "source": "drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c",
+        "sha256": "96ce0e7de1d0e50a2603621fef331007ff0db75501769b043a0f76e94f78701e",
+        "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c",
+        "source_ranges": "2666,2758",
+        "observation": "descriptor name comes from tcpc,name and is passed to tcpc_device_register"
+      },
+      {
+        "source": "drivers/misc/mediatek/typec/tcpc/tcpci_core.c",
+        "sha256": "ee24003c86a53bf93ad084fb6fb88227f41f71b6caf135809d56180bad155976",
+        "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/misc/mediatek/typec/tcpc/tcpci_core.c",
+        "source_ranges": "431-448,895",
+        "observation": "tcpc class device uses descriptor name; class is tcpc"
+      }
+    ]
+  }
+]

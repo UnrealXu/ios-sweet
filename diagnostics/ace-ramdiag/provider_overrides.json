@@ -1,0 +1,178 @@
+[
+  {
+    "module": "clk-mt6895.ko",
+    "compatible": [
+      "mediatek,mt6895-apmixedsys",
+      "mediatek,mt6895-mfgpll_pll_ctrl",
+      "mediatek,mt6895-mfgscpll_pll_ctrl",
+      "mediatek,mt6895-topckgen",
+      "mediatek,mt6895-vlp_cksys"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895.c",
+    "sha256": "a82cd30a980a202abb6dd587e8632ceb30367327cf8b9f7e69130e6ff7bb9dec",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895.c"
+  },
+  {
+    "module": "clk-mt6895-peri.ko",
+    "compatible": [
+      "mediatek,mt6895-imp_iic_wrap_c",
+      "mediatek,mt6895-imp_iic_wrap_s",
+      "mediatek,mt6895-imp_iic_wrap_w",
+      "mediatek,mt6895-pericfg_ao",
+      "mediatek,mt6895-ssusb_sifslv_ippc",
+      "mediatek,mt6895-ssusb_sifslv_ippc_p1",
+      "mediatek,mt6895-ufs_ao_config",
+      "mediatek,mt6895-ufs_pdn_cfg"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-peri.c",
+    "sha256": "6645491c3ba9417e84375ff580ffae33a3b62ddeaceae94e00435f0cd1f0f8ff",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-peri.c"
+  },
+  {
+    "module": "clk-mt6895-bus.ko",
+    "compatible": [
+      "mediatek,mt6895-infracfg_ao"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-bus.c",
+    "sha256": "782ecb9025eb8016494c9a51a085641af8f6a212d8a32cc34309dc21c3b45583",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-bus.c"
+  },
+  {
+    "module": "clk-mt6895-adsp.ko",
+    "compatible": [
+      "mediatek,mt6895-afe"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-adsp.c",
+    "sha256": "33b81369133847938cf26c757c4d5dc975cc4b956758709c7c888d6e10cb5ee3",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-adsp.c"
+  },
+  {
+    "module": "clk-mt6895-cam.ko",
+    "compatible": [
+      "mediatek,mt6895-cam_main_r1a",
+      "mediatek,mt6895-camsys_mraw",
+      "mediatek,mt6895-camsys_rawa",
+      "mediatek,mt6895-camsys_rawb",
+      "mediatek,mt6895-camsys_rawc",
+      "mediatek,mt6895-camsys_yuva",
+      "mediatek,mt6895-camsys_yuvb",
+      "mediatek,mt6895-camsys_yuvc"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-cam.c",
+    "sha256": "98029f9ca6c927e21ddf326a6d6bbcc2ac77d2aa7d8a30e2de920c24e9ae8a9c",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-cam.c"
+  },
+  {
+    "module": "clk-mt6895-img.ko",
+    "compatible": [
+      "mediatek,mt6895-dip_nr_dip1",
+      "mediatek,mt6895-dip_top_dip1",
+      "mediatek,mt6895-imgsys_main",
+      "mediatek,mt6895-ipesys",
+      "mediatek,mt6895-wpe1_dip1",
+      "mediatek,mt6895-wpe2_dip1",
+      "mediatek,mt6895-wpe3_dip1"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-img.c",
+    "sha256": "d4673a15988e3f9434a86f0e233b1bde5fc6d169bca903bc7d2f9d18d4417faf",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-img.c"
+  },
+  {
+    "module": "clk-mt6895-mmsys.ko",
+    "compatible": [
+      "mediatek,mt6895-mminfra_config",
+      "mediatek,mt6895-mmsys0",
+      "mediatek,mt6895-mmsys1"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-mmsys.c",
+    "sha256": "2a790cedc6b4d944ca9051bce68af0a674165c0da4e612d5dec354b1d98bf88b",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-mmsys.c"
+  },
+  {
+    "module": "clk-mt6895-mdpsys.ko",
+    "compatible": [
+      "mediatek,mt6895-mdpsys",
+      "mediatek,mt6895-mdpsys1"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-mdpsys.c",
+    "sha256": "a6e5a7b90708efa845fa51ef1d0840a348be5f352fcf9b4e7b14f40f5402bc3d",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-mdpsys.c"
+  },
+  {
+    "module": "clk-mt6895-vcodec.ko",
+    "compatible": [
+      "mediatek,mt6895-vdec_gcon_base",
+      "mediatek,mt6895-vdec_soc_gcon_base",
+      "mediatek,mt6895-vencsys",
+      "mediatek,mt6895-vencsys_c1"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-vcodec.c",
+    "sha256": "93bb782de652d891a0b34433b63639c93bb191ba42ca473402c19ca1d1893016",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-vcodec.c"
+  },
+  {
+    "module": "clk-mt6895-ccu.ko",
+    "compatible": [
+      "mediatek,mt6895-ccu"
+    ],
+    "source": "drivers/clk/mediatek/clk-mt6895-ccu.c",
+    "sha256": "894a73ccaf48a04839922032f2692773a80b970e08ab9c5686334c25a6e7d8e3",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/clk/mediatek/clk-mt6895-ccu.c"
+  },
+  {
+    "module": "mtk-scpsys-mt6895.ko",
+    "compatible": [
+      "mediatek,mt6895-scpsys"
+    ],
+    "source": "drivers/soc/mediatek/mtk-scpsys-mt6895.c",
+    "sha256": "ffef3ef4c6a8f49cf7427f817688662db7e81f8782ff28d2a020fb77eb7fe042",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/soc/mediatek/mtk-scpsys-mt6895.c"
+  },
+  {
+    "module": "pinctrl-mt6895.ko",
+    "compatible": [
+      "mediatek,mt6895-pinctrl"
+    ],
+    "source": "drivers/pinctrl/mediatek/pinctrl-mt6895.c",
+    "sha256": "62bb19fc2e2804c1a483e2329c6aa74f043ed52d89d09646547c6439cc33db59",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/pinctrl/mediatek/pinctrl-mt6895.c"
+  },
+  {
+    "module": "ufs-mediatek-mod.ko",
+    "compatible": [
+      "mediatek,mt8183-ufshci"
+    ],
+    "source": "drivers/scsi/ufs/ufs-mediatek.c",
+    "sha256": "10e6ab96dfe818f4f4a2497bee7a0ea0b66a0e42078fc10894d154fbee98ee64",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/scsi/ufs/ufs-mediatek.c"
+  },
+  {
+    "module": "mt6363-regulator.ko",
+    "compatible": [
+      "mediatek,mt6363"
+    ],
+    "platform_cell": "mt6363-regulator",
+    "source": "drivers/mfd/mtk-spmi-pmic.c",
+    "sha256": "8a7d33a415b213e53a2d2a3a0efb311f12546e17b58365a479331e541c6a278a",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/mfd/mtk-spmi-pmic.c"
+  },
+  {
+    "module": "mt6368-regulator.ko",
+    "compatible": [
+      "mediatek,mt6368"
+    ],
+    "platform_cell": "mt6368-regulator",
+    "source": "drivers/mfd/mtk-spmi-pmic.c",
+    "sha256": "8a7d33a415b213e53a2d2a3a0efb311f12546e17b58365a479331e541c6a278a",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/mfd/mtk-spmi-pmic.c"
+  },
+  {
+    "module": "mux_switch.ko",
+    "compatible": [
+      "mediatek,typec_mux_switch"
+    ],
+    "source": "drivers/misc/mediatek/typec/mux/mux_switch.c",
+    "sha256": "219fead7efba5d76a337224408daaa7d67a90d5214924bef9ecea21efb35839e",
+    "url": "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895/8baa5a377e2776402de745579cc3835d08ee1cca/drivers/misc/mediatek/typec/mux/mux_switch.c"
+  }
+]

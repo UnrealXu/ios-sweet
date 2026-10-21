@@ -12,17 +12,26 @@ Edit the sources under BUILDTREE/xnu, re-run, and turn the result into
 patches with `git diff` there. Uses the local Apple-fork clang (swiftlang).
 
 Env: XNU_CC_EXTRA   extra flags (e.g. "-DKPERF -DKPC" for config changes)
+     XNU_CLANG      explicit clang executable (default ~/swift/usr/bin/clang)
+     XNU_CLANGXX    optional C++ executable override
+     XNU_CC_JOBS    bounded compiler concurrency (default at most 4)
      XNU_CC_POST    flags appended after the original ones (like a per-object
                     _CFLAGS_ADD in the xnu Makefiles: -U/-include after -D)
      XNU_CC_OBJDIR  emit real objects there instead of a syntax-only check
                     (then: llvm-nm for undefined symbols = link errors)
 """
-import concurrent.futures as cf, os, re, shlex, subprocess, sys
+import concurrent.futures as cf, os, re, shlex, shutil, subprocess, sys
 from collections import Counter
 
 CI_DXB = '/Users/runner/work/ios-sweet/ios-sweet/dxb'
 CI_SDK_PLATFORM = re.compile(r'/Applications/Xcode[^ ]*?\.sdk/+System/Library/Frameworks/Kernel\.framework/Versions/A/PrivateHeaders/platform')
-CLANG = os.path.expanduser('~/swift/usr/bin/clang')
+# Explicit selection supports machines whose Swift/Apple toolchain lives
+# elsewhere. Do not silently replace it with a different compiler family.
+CLANG = os.path.expanduser(os.environ.get('XNU_CLANG', '~/swift/usr/bin/clang'))
+CLANG = shutil.which(CLANG) or CLANG
+CLANGXX = os.environ.get('XNU_CLANGXX') or re.sub(r'clang(?=(-\d+)?$)', 'clang++', CLANG)
+CLANGXX = os.path.expanduser(CLANGXX)
+CLANGXX = shutil.which(CLANGXX) or CLANGXX
 DROP = {'-c', '-g', '-MD', '-MMD'}
 DROP_WITH_ARG = {'-MF', '-MT', '-o', '-arch'}
 COMPONENTS = ('osfmk', 'bsd', 'iokit', 'libkern', 'pexpert', 'security', 'san', 'libsa')
@@ -93,7 +102,7 @@ def run(item, bt, cdirs):
     src, (kind, args) = item
     objdir = os.environ.get('XNU_CC_OBJDIR')
     mode = ['-c', '-o', os.path.join(objdir, src.replace(CI_DXB + '/xnu/', '').replace('/', '__') + '.o')] if objdir else ['-fsyntax-only']
-    new = [CLANG if kind == 'clang' else CLANG + '++', '-target', 'arm64-apple-macos14.0', *mode,
+    new = [CLANG if kind == 'clang' else CLANGXX, '-target', 'arm64-apple-macos14.0', *mode,
            # Apple clang-only builtins (kalloc_type); values only matter for codegen
            '-D__builtin_xnu_type_signature(...)=""', '-D__builtin_xnu_type_summary(...)=0',
            '-D__builtin_xnu_types_compatible(...)=1'] + os.environ.get('XNU_CC_EXTRA', '').split()
@@ -150,7 +159,10 @@ def main():
     cdirs = component_dirs(bt)
     print(f'{len(cmds)} files, build dirs: {sorted(cdirs)}', file=sys.stderr)
     errors, failed = Counter(), []
-    with cf.ThreadPoolExecutor(os.cpu_count()) as ex:
+    jobs = int(os.environ.get('XNU_CC_JOBS', min(4, os.cpu_count() or 1)))
+    if not 1 <= jobs <= 32:
+        raise ValueError('XNU_CC_JOBS must be between 1 and 32')
+    with cf.ThreadPoolExecutor(jobs) as ex:
         for src, rc, err in ex.map(lambda i: run(i, bt, cdirs), cmds.items()):
             if rc:
                 failed.append(src.replace(CI_DXB + '/xnu/', ''))
